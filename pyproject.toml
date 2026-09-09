@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a2c-sensor-tools"
+version = "0.1.0"
+description = "A2C IMU configuration, monitoring, and CAN firmware update tools"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+  { name = "A2C" },
+]
+dependencies = [
+  "PySide6>=6.5,<7",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Win32 (MS Windows)",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Hardware",
+]
+
+[project.urls]
+Homepage = "https://github.com/jacoblilsys/A2C-Sensor-Tools"
+Issues = "https://github.com/jacoblilsys/A2C-Sensor-Tools/issues"
+Releases = "https://github.com/jacoblilsys/A2C-Sensor-Tools/releases"
+
+[project.scripts]
+a2c-imu-dashboard = "a2c_sensor_tools.can_sensor_dashboard_qt:main"
+a2c-firmware-updater = "a2c_sensor_tools.can_firmware_update_qt:main"
+a2c-can-monitor = "a2c_sensor_tools.can_sensor_monitor:main"
+a2c-firmware-update = "a2c_sensor_tools.can_firmware_update:main"
+
+[tool.setuptools]
+packages = ["a2c_sensor_tools"]

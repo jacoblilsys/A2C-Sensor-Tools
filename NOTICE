@@ -1,0 +1,6 @@
+A2C Sensor Tools
+Copyright 2026 A2C
+
+This product includes software developed using Qt for Python and software that
+interfaces with the separately installed Kvaser CANlib runtime. See
+THIRD_PARTY_NOTICES.md for licensing information.

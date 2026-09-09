@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Runtime and customer data
+*.log
+captures/
+
+# Firmware is distributed as a GitHub Release asset, never source-controlled.
+*.bin
+*.binenc
+*.elf
+*.hex
+*.map
+*.list
