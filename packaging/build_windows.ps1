@@ -32,34 +32,53 @@ if ($LASTEXITCODE -ne 0) {
 }
 $version = $versionOutput.Trim()
 
-& $Python -m PyInstaller `
-    --noconfirm `
-    --clean `
-    --onedir `
-    --windowed `
-    --contents-directory "_internal" `
-    --name "A2C-Sensor-Firmware-Updater" `
-    --distpath $stageRoot `
-    --workpath (Join-Path $buildRoot "gui") `
-    --specpath $buildRoot `
-    (Join-Path $repoRoot "packaging\firmware_updater_entry.py")
-if ($LASTEXITCODE -ne 0) {
-    throw "GUI packaging failed"
-}
+$pythonExecutable = (Get-Command $Python -ErrorAction Stop).Source
+$pythonDirectory = Split-Path -Parent $pythonExecutable
+$controlledPath = @(
+    $pythonDirectory
+    (Join-Path $pythonDirectory "Scripts")
+    (Join-Path $env:SystemRoot "System32")
+    $env:SystemRoot
+) -join ";"
+$originalPath = $env:PATH
 
-$appDirectory = Join-Path $stageRoot "A2C-Sensor-Firmware-Updater"
-& $Python -m PyInstaller `
-    --noconfirm `
-    --clean `
-    --onefile `
-    --console `
-    --name "a2c-firmware-update" `
-    --distpath $appDirectory `
-    --workpath (Join-Path $buildRoot "cli") `
-    --specpath $buildRoot `
-    (Join-Path $repoRoot "packaging\firmware_update_cli_entry.py")
-if ($LASTEXITCODE -ne 0) {
-    throw "Command-line helper packaging failed"
+try {
+    # Avoid collecting unrelated DLLs from developer tools on PATH. In
+    # particular, Qt must use the Windows ICU runtime expected by PySide6.
+    $env:PATH = $controlledPath
+
+    & $pythonExecutable -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --onedir `
+        --windowed `
+        --contents-directory "_internal" `
+        --name "A2C-Sensor-Firmware-Updater" `
+        --distpath $stageRoot `
+        --workpath (Join-Path $buildRoot "gui") `
+        --specpath $buildRoot `
+        (Join-Path $repoRoot "packaging\firmware_updater_entry.py")
+    if ($LASTEXITCODE -ne 0) {
+        throw "GUI packaging failed"
+    }
+
+    $appDirectory = Join-Path $stageRoot "A2C-Sensor-Firmware-Updater"
+    $internalDirectory = Join-Path $appDirectory "_internal"
+    & $pythonExecutable -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --onefile `
+        --console `
+        --name "a2c-firmware-update" `
+        --distpath $internalDirectory `
+        --workpath (Join-Path $buildRoot "cli") `
+        --specpath $buildRoot `
+        (Join-Path $repoRoot "packaging\firmware_update_cli_entry.py")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command-line helper packaging failed"
+    }
+} finally {
+    $env:PATH = $originalPath
 }
 
 Copy-Item -LiteralPath (Join-Path $repoRoot "packaging\CUSTOMER_README.txt") -Destination $appDirectory
@@ -79,7 +98,7 @@ if ($FirmwarePackage) {
     Copy-Item -LiteralPath $firmwarePath -Destination $appDirectory
 }
 
-$cliExecutable = Join-Path $appDirectory "a2c-firmware-update.exe"
+$cliExecutable = Join-Path $internalDirectory "a2c-firmware-update.exe"
 & $cliExecutable --help | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Packaged command-line helper smoke test failed"

@@ -619,7 +619,15 @@ class FirmwareUpdaterWindow(QMainWindow):
         update_arguments = build_update_arguments(config, dry_run=dry_run)
         cli_path = Path(__file__).with_name(profile.cli_filename).resolve()
         if getattr(sys, "frozen", False):
-            program = Path(sys.executable).with_name("a2c-firmware-update.exe")
+            executable_directory = Path(sys.executable).resolve().parent
+            helper_candidates = (
+                executable_directory / "_internal" / "a2c-firmware-update.exe",
+                executable_directory / "a2c-firmware-update.exe",
+            )
+            program = next(
+                (candidate for candidate in helper_candidates if candidate.exists()),
+                helper_candidates[0],
+            )
             arguments = update_arguments
             working_directory = program.parent
             if not program.exists():

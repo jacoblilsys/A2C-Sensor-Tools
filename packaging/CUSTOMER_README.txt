@@ -39,3 +39,7 @@ bitrate, and all unfiltered CAN traffic.
 
 This PEAK build is pending validation with physical PEAK hardware. The
 executables are not code-signed, so Windows may show a SmartScreen warning.
+
+Only A2C-Sensor-Firmware-Updater.exe is intended to be started by the user.
+Files in the _internal folder are application components and should not be
+opened or moved individually.
