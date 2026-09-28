@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -30,6 +33,29 @@ class FirmwareUpdaterQtTests(unittest.TestCase):
         self.assertEqual(parse_standard_can_id("0x3E8"), 0x3E8)
         self.assertEqual(parse_standard_can_id("3E8"), 0x3E8)
         self.assertIsNone(parse_standard_can_id("", optional=True))
+
+    def test_module_can_be_loaded_from_direct_script_directory(self) -> None:
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "a2c_sensor_tools"
+            / "can_firmware_update_qt.py"
+        )
+        environment = os.environ.copy()
+        environment.setdefault("QT_QPA_PLATFORM", "offscreen")
+        probe = (
+            "import runpy; "
+            f"runpy.run_path({str(script)!r}, run_name='direct_launch_probe')"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=script.parent,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_can_id_rejects_out_of_range_value(self) -> None:
         with self.assertRaisesRegex(ValueError, "11-bit"):

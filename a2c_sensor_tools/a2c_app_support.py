@@ -14,7 +14,10 @@ from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QMainWindow, QMessageBox
 
-from .version import APP_VERSION
+if __package__:
+    from .version import APP_VERSION
+else:  # Direct execution from the package directory.
+    from version import APP_VERSION  # type: ignore
 
 
 APP_SUITE_NAME = "A2C Sensor Tools"
