@@ -87,6 +87,16 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "NOTICE") -Destination $appDirectory
 Copy-Item -LiteralPath (Join-Path $repoRoot "THIRD_PARTY_NOTICES.md") -Destination $appDirectory
 Copy-Item -LiteralPath (Join-Path $repoRoot "docs\PEAK_HARDWARE_VALIDATION.md") -Destination $appDirectory
 
+# PySide6's Qt6Core uses the Windows ICU runtime. An unrelated unversioned
+# icuuc.dll collected from another developer tool shadows the Windows DLL and
+# makes QtCore fail at startup with "The specified procedure could not be
+# found." Refuse to publish such a package.
+$unexpectedIcu = @(Get-ChildItem -LiteralPath $appDirectory -Recurse -File -Filter "icuuc.dll")
+if ($unexpectedIcu.Count -ne 0) {
+    $paths = $unexpectedIcu.FullName -join ", "
+    throw "Unexpected ICU runtime collected in customer package: $paths"
+}
+
 if ($FirmwarePackage) {
     $firmwarePath = [System.IO.Path]::GetFullPath($FirmwarePackage)
     if (-not (Test-Path -LiteralPath $firmwarePath -PathType Leaf)) {
