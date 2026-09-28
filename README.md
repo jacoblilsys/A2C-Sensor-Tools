@@ -104,6 +104,21 @@ PCAN-Basic DLL that verifies PEAK channel discovery, classic-CAN bitrate setup,
 framing, timestamps, error handling, and channel release. Physical PEAK
 hardware validation is still required.
 
+## Build the Windows customer package
+
+Install the optional build dependency and run the packaging script:
+
+```powershell
+python -m pip install ".[build]"
+.\packaging\build_windows.ps1
+```
+
+The script creates a versioned ZIP and SHA-256 file below `dist`. The ZIP
+contains the graphical updater, its command-line helper, Qt runtime files,
+customer instructions, and license notices. It does not include vendor CAN
+drivers or firmware. To add a supplied encrypted firmware image to a private
+customer package, pass `-FirmwarePackage path\to\firmware.binenc`.
+
 ## License
 
 Copyright 2026 A2C.

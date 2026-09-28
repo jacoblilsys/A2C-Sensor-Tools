@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a2c-sensor-tools"
-version = "0.1.0"
+version = "0.2.0b1"
 description = "A2C IMU configuration, monitoring, and CAN firmware update tools"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,6 +26,11 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: System :: Hardware",
+]
+
+[project.optional-dependencies]
+build = [
+  "pyinstaller>=6.12,<7",
 ]
 
 [project.urls]

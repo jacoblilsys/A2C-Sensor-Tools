@@ -14,9 +14,10 @@ from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QMainWindow, QMessageBox
 
+from .version import APP_VERSION
+
 
 APP_SUITE_NAME = "A2C Sensor Tools"
-APP_VERSION = "0.1.0"
 
 # Set this to "owner/repository" when the public GitHub repository is created.
 # The environment override is useful for testing a build before publication.

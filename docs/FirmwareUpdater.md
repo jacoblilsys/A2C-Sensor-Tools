@@ -1,7 +1,8 @@
 # A2C-IMU V2 firmware updater
 
 The graphical updater accepts a complete encrypted `.binenc` firmware package
-supplied by A2C and transfers it over classic CAN using a Kvaser interface.
+supplied by A2C and transfers it over classic CAN using a Kvaser or PEAK
+interface.
 
 ## Safety checks
 
@@ -23,7 +24,8 @@ reports success only when they match the selected package.
 1. Connect only the sensor being updated.
 2. Start **A2C Sensor Firmware Updater**.
 3. Select the encrypted A2C `.binenc` package.
-4. Select the Kvaser channel, CAN bitrate, sample point, and request ID.
+4. Select the CAN adapter, channel, bitrate, and request ID. The sample-point
+   option applies to Kvaser only.
 5. Leave the response ID empty unless the bus contains more than one possible
    response.
 6. Select **Check Sensor**.
@@ -32,7 +34,7 @@ reports success only when they match the selected package.
 9. Keep CAN and sensor power connected until installed firmware and CRC
    verification succeeds.
 
-The Kvaser channel always operates in normal/active mode. The updater installs
+The CAN channel always operates in normal/active mode. The updater installs
 no host acceptance filter and records all observed CAN traffic during the
 operation. By default, logs are written below
 `%LOCALAPPDATA%\A2C\SensorTools\logs`.
