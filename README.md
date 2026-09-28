@@ -1,7 +1,7 @@
 # A2C Sensor Tools
 
 Open-source Windows tools for configuring, monitoring, and updating A2C-IMU V2
-sensors over classic CAN with a Kvaser interface.
+sensors over classic CAN.
 
 The repository contains two Qt 6 applications:
 
@@ -16,13 +16,21 @@ The repository contains two Qt 6 applications:
 
 - Windows 10 or Windows 11
 - Python 3.10 or newer when running from source
-- A supported Kvaser CAN interface
-- The current [Kvaser CANlib SDK](https://kvaser.com/canlib-sdk/)
-- The matching [Kvaser Windows device driver](https://kvaser.com/canlib-webhelp/section_install_windows.htm)
+- For the dashboard: a supported Kvaser CAN interface, the current
+  [Kvaser CANlib SDK](https://kvaser.com/canlib-sdk/), and the matching
+  [Kvaser Windows driver](https://kvaser.com/canlib-webhelp/section_install_windows.htm)
+- For the firmware updater: either the Kvaser setup above or a PEAK-System
+  PCAN-USB interface with the
+  [PEAK Windows driver and PCAN-Basic API][pcan-basic]
 
 **The Kvaser CANlib SDK must install `canlib32.dll` before either application
 can use a CAN interface.** The A2C applications do not include or replace
 `canlib32.dll` or the Kvaser hardware driver.
+
+**PEAK support requires `PCANBasic.dll`, installed by PEAK's Windows driver/API
+package.** The DLL and hardware driver are not included in this repository.
+PEAK support currently applies to the firmware updater; dashboard support can
+be added after the updater transport has been validated on physical hardware.
 
 ## Install from source
 
@@ -56,6 +64,23 @@ that accepts the selected request ID, use **Check Sensor** before updating, and
 keep CAN and sensor power connected until final firmware and CRC verification
 complete.
 
+Select **Kvaser CANlib** or **PEAK PCAN-Basic** in the updater's CAN interface
+section. PEAK channels are shown as `PCAN_USBBUS1` through `PCAN_USBBUS16`.
+The sample-point selector is disabled for PEAK because PCAN-Basic's classic-CAN
+bitrate presets define their own bit timing.
+
+The equivalent PEAK command-line preflight is:
+
+```powershell
+a2c-firmware-update update firmware.binenc --adapter peak --channel 0x51 --bitrate 250000 --dry-run
+```
+
+Run **Check Sensor** before the first update on a customer PC. The full raw CAN
+log identifies the adapter backend, API version, channel, bitrate, and all
+unfiltered transmit/receive traffic. See
+[PEAK hardware validation](docs/PEAK_HARDWARE_VALIDATION.md) for the first-PC
+test procedure.
+
 The public updater cannot create or encrypt firmware packages and does not
 contain empty-flash factory recovery functions or firmware encryption keys.
 
@@ -74,13 +99,17 @@ $env:QT_QPA_PLATFORM = "offscreen"
 python -m unittest discover -s tests -v
 ```
 
-The offline test suite does not open a Kvaser channel. Hardware validation is
-maintained separately by A2C.
+The offline test suite does not open a physical CAN channel. It includes a fake
+PCAN-Basic DLL that verifies PEAK channel discovery, classic-CAN bitrate setup,
+framing, timestamps, error handling, and channel release. Physical PEAK
+hardware validation is still required.
 
 ## License
 
 Copyright 2026 A2C.
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
-PySide6, Qt, and Kvaser CANlib remain subject to their own licenses; see
+PySide6, Qt, Kvaser CANlib, and PEAK PCAN-Basic remain subject to their own licenses; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+[pcan-basic]: https://www.peak-system.com/products/software/development-packages/pcan-basic/

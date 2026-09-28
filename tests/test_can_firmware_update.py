@@ -14,6 +14,7 @@ from a2c_sensor_tools.can_firmware_update import (
     INFO_SIZE,
     PROGRAM_START,
     TrafficLoggingChannel,
+    build_parser,
     default_can_log_path,
     inspect_package,
     stm32_crc,
@@ -39,6 +40,23 @@ def plaintext_image() -> bytes:
     image[BOOTLOADER_END - INFO_SIZE : BOOTLOADER_END] = metadata(0x0F, 0x12345678)
     image[FLASH_SIZE - INFO_SIZE :] = metadata(0x125, 0x89ABCDEF)
     return bytes(image)
+
+
+class CommandLineTests(unittest.TestCase):
+    def test_peak_channel_accepts_hex_handle(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "update",
+                "firmware.binenc",
+                "--adapter",
+                "peak",
+                "--channel",
+                "0x51",
+                "--dry-run",
+            ]
+        )
+        self.assertEqual(args.adapter, "peak")
+        self.assertEqual(args.channel, 0x51)
 
 
 class Stm32CrcTests(unittest.TestCase):

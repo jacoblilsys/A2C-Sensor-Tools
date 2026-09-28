@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 A2C
 # SPDX-License-Identifier: Apache-2.0
-"""Qt 6 front end for the A2C-IMU V2 Kvaser CAN firmware updater."""
+"""Qt 6 front end for the A2C-IMU V2 CAN firmware updater."""
 
 from __future__ import annotations
 
@@ -49,6 +49,7 @@ try:
         SAMPLE_POINT_SEGMENTS,
         SUPPORTED_BITRATES,
     )
+    from .pcan_basic import PcanBasic, PcanError
 except ImportError:  # Direct execution from the Tools directory.
     from a2c_app_support import APP_VERSION, install_help_menu  # type: ignore
     from firmware_update_profiles import (  # type: ignore
@@ -61,12 +62,17 @@ except ImportError:  # Direct execution from the Tools directory.
         SAMPLE_POINT_SEGMENTS,
         SUPPORTED_BITRATES,
     )
+    from pcan_basic import PcanBasic, PcanError  # type: ignore
 
 
 APP_TITLE = "A2C Sensor Firmware Updater"
 DEFAULT_REQUEST_ID = 0x3E8
 DEFAULT_PROGRESS_MAXIMUM = 100
 PROGRESS_PATTERN = re.compile(r"Programming\s+(\d+)/(\d+)\s+pages")
+ADAPTER_NAMES = {
+    "kvaser": "Kvaser CANlib",
+    "peak": "PEAK PCAN-Basic",
+}
 
 
 def default_can_log_path(image: Path, stamp: str) -> Path:
@@ -141,6 +147,7 @@ def format_bitrate(bitrate: int) -> str:
 @dataclass(frozen=True)
 class UpdateConfiguration:
     image: Path
+    adapter: str
     channel: int
     bitrate: int
     sample_point: str
@@ -155,6 +162,8 @@ def build_update_arguments(config: UpdateConfiguration, *, dry_run: bool) -> lis
     arguments = [
         "update",
         str(config.image),
+        "--adapter",
+        config.adapter,
         "--channel",
         str(config.channel),
         "--bitrate",
@@ -222,6 +231,7 @@ class FirmwareUpdaterWindow(QMainWindow):
         self._dry_run = False
         self._next_progress_log_percent = 0
         self._can_log_path: Optional[Path] = None
+        self._channel_by_adapter: dict[str, int] = {}
 
         self._release_checker = install_help_menu(self, APP_TITLE)
         self._build_ui()
@@ -252,9 +262,13 @@ class FirmwareUpdaterWindow(QMainWindow):
 
         can_group = QGroupBox("CAN interface")
         can_grid = QGridLayout(can_group)
+        self.adapter_combo = QComboBox()
+        for adapter, display_name in ADAPTER_NAMES.items():
+            self.adapter_combo.addItem(display_name, adapter)
+        self.adapter_combo.currentIndexChanged.connect(self._adapter_changed)
         self.channel_combo = QComboBox()
         self.channel_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.channel_combo.currentIndexChanged.connect(self._update_start_enabled)
+        self.channel_combo.currentIndexChanged.connect(self._channel_changed)
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_channels)
         self.bitrate_combo = QComboBox()
@@ -264,13 +278,15 @@ class FirmwareUpdaterWindow(QMainWindow):
         for sample_point in SAMPLE_POINT_SEGMENTS:
             self.sample_point_combo.addItem(f"{sample_point}%", sample_point)
 
-        can_grid.addWidget(QLabel("Kvaser channel"), 0, 0)
-        can_grid.addWidget(self.channel_combo, 0, 1, 1, 3)
-        can_grid.addWidget(self.refresh_button, 0, 4)
-        can_grid.addWidget(QLabel("Baud rate"), 1, 0)
-        can_grid.addWidget(self.bitrate_combo, 1, 1)
-        can_grid.addWidget(QLabel("Sample point"), 1, 2)
-        can_grid.addWidget(self.sample_point_combo, 1, 3)
+        can_grid.addWidget(QLabel("Adapter"), 0, 0)
+        can_grid.addWidget(self.adapter_combo, 0, 1, 1, 3)
+        can_grid.addWidget(QLabel("Channel"), 1, 0)
+        can_grid.addWidget(self.channel_combo, 1, 1, 1, 3)
+        can_grid.addWidget(self.refresh_button, 1, 4)
+        can_grid.addWidget(QLabel("Baud rate"), 2, 0)
+        can_grid.addWidget(self.bitrate_combo, 2, 1)
+        can_grid.addWidget(QLabel("Sample point"), 2, 2)
+        can_grid.addWidget(self.sample_point_combo, 2, 3)
         can_grid.setColumnStretch(1, 1)
         can_grid.setColumnStretch(3, 1)
         outer.addWidget(can_group)
@@ -352,6 +368,7 @@ class FirmwareUpdaterWindow(QMainWindow):
         self._input_widgets = (
             self.image_edit,
             self.browse_button,
+            self.adapter_combo,
             self.channel_combo,
             self.refresh_button,
             self.bitrate_combo,
@@ -367,6 +384,11 @@ class FirmwareUpdaterWindow(QMainWindow):
         self.request_id_edit.setText(str(self._settings.value("request_id", "0x3E8")))
         self.update_id_edit.setText(str(self._settings.value("update_id", "0x3E8")))
         self.response_id_edit.setText(str(self._settings.value("response_id", "")))
+
+        adapter = str(self._settings.value("adapter", "kvaser"))
+        index = self.adapter_combo.findData(adapter)
+        if index >= 0:
+            self.adapter_combo.setCurrentIndex(index)
 
         bitrate = int(self._settings.value("bitrate", 250_000))
         index = self.bitrate_combo.findData(bitrate)
@@ -385,7 +407,13 @@ class FirmwareUpdaterWindow(QMainWindow):
 
     def _save_settings(self) -> None:
         self._settings.setValue("image", self.image_edit.text().strip())
-        self._settings.setValue("channel", self.channel_combo.currentData())
+        adapter = str(self.adapter_combo.currentData())
+        self._settings.setValue("adapter", adapter)
+        channel = self.channel_combo.currentData()
+        if channel is not None:
+            self._channel_by_adapter[adapter] = int(channel)
+        for saved_adapter, saved_channel in self._channel_by_adapter.items():
+            self._settings.setValue(f"channel_{saved_adapter}", saved_channel)
         self._settings.setValue("bitrate", self.bitrate_combo.currentData())
         self._settings.setValue("sample_point", self.sample_point_combo.currentData())
         self._settings.setValue("request_id", self.request_id_edit.text().strip())
@@ -455,17 +483,41 @@ class FirmwareUpdaterWindow(QMainWindow):
         self._update_start_enabled()
 
     def _apply_profile_ui(self) -> None:
-        return
+        is_kvaser = self.adapter_combo.currentData() == "kvaser"
+        self.sample_point_combo.setEnabled(not self._running and is_kvaser)
+        self.sample_point_combo.setToolTip(
+            "Kvaser bit timing sample point"
+            if is_kvaser
+            else "PEAK classic-CAN bitrate presets define the bit timing and sample point."
+        )
+
+    def _adapter_changed(self, _index: int) -> None:
+        self._apply_profile_ui()
+        self.refresh_channels(show_dialog=False)
+
+    def _channel_changed(self, _index: int) -> None:
+        channel = self.channel_combo.currentData()
+        adapter = self.adapter_combo.currentData()
+        if adapter is not None and channel is not None:
+            self._channel_by_adapter[str(adapter)] = int(channel)
+        self._update_start_enabled()
 
     def refresh_channels(self, show_dialog: bool = True) -> None:
-        previous = self.channel_combo.currentData()
+        adapter = str(self.adapter_combo.currentData())
+        adapter_name = ADAPTER_NAMES[adapter]
+        previous = self._channel_by_adapter.get(adapter)
         if previous is None:
-            previous = int(self._settings.value("channel", 0))
+            default_channel = 0 if adapter == "kvaser" else 0x51
+            saved = self._settings.value(f"channel_{adapter}")
+            if saved is None and adapter == "kvaser":
+                saved = self._settings.value("channel", default_channel)
+            previous = int(saved if saved is not None else default_channel)
         self.channel_combo.clear()
         try:
-            channels = KvaserCanlib().list_channels()
-        except (KvaserError, OSError) as exc:
-            self.channel_combo.addItem("Kvaser CANlib unavailable", None)
+            api = PcanBasic() if adapter == "peak" else KvaserCanlib()
+            channels = api.list_channels()
+        except (KvaserError, PcanError, OSError) as exc:
+            self.channel_combo.addItem(f"{adapter_name} unavailable", None)
             self._append_log(str(exc))
             if show_dialog:
                 QMessageBox.warning(self, APP_TITLE, str(exc))
@@ -475,14 +527,14 @@ class FirmwareUpdaterWindow(QMainWindow):
         for channel in channels:
             description = f" — {channel.description}" if channel.description else ""
             self.channel_combo.addItem(
-                f"{channel.number}: {channel.name}{description}", channel.number
+                f"{channel.name}{description}", channel.number
             )
         index = self.channel_combo.findData(previous)
         self.channel_combo.setCurrentIndex(index if index >= 0 else 0)
         if not channels:
-            self.channel_combo.addItem("No Kvaser channels found", None)
+            self.channel_combo.addItem(f"No {adapter_name} channels found", None)
         elif show_dialog:
-            self._append_log(f"Found {len(channels)} Kvaser CAN channel(s)")
+            self._append_log(f"Found {len(channels)} {adapter_name} channel(s)")
         self._update_start_enabled()
 
     def _configuration(self) -> UpdateConfiguration:
@@ -491,7 +543,7 @@ class FirmwareUpdaterWindow(QMainWindow):
             raise ValueError("select a valid encrypted firmware package")
         channel = self.channel_combo.currentData()
         if channel is None:
-            raise ValueError("select an available Kvaser CAN channel")
+            raise ValueError("select an available CAN channel")
 
         request_id = parse_standard_can_id(self.request_id_edit.text())
         update_id = parse_standard_can_id(self.update_id_edit.text())
@@ -501,6 +553,7 @@ class FirmwareUpdaterWindow(QMainWindow):
         can_log = default_can_log_path(image, stamp)
         return UpdateConfiguration(
             image=image,
+            adapter=str(self.adapter_combo.currentData()),
             channel=int(channel),
             bitrate=int(self.bitrate_combo.currentData()),
             sample_point=str(self.sample_point_combo.currentData()),
@@ -564,9 +617,11 @@ class FirmwareUpdaterWindow(QMainWindow):
         self.progress_bar.setFormat("Checking sensor…" if dry_run else "Starting update…")
 
         update_arguments = build_update_arguments(config, dry_run=dry_run)
+        cli_path = Path(__file__).with_name(profile.cli_filename).resolve()
         if getattr(sys, "frozen", False):
             program = Path(sys.executable).with_name("a2c-firmware-update.exe")
             arguments = update_arguments
+            working_directory = program.parent
             if not program.exists():
                 QMessageBox.critical(
                     self,
@@ -575,19 +630,20 @@ class FirmwareUpdaterWindow(QMainWindow):
                 )
                 return
         else:
-            cli_path = Path(__file__).with_name(profile.cli_filename).resolve()
             program = Path(sys.executable)
             arguments = ["-u", str(cli_path), *update_arguments]
+            working_directory = cli_path.parent.parent
         mode = "Preflight" if dry_run else "Update"
         self._append_log(
-            f"{mode} started for {profile.display_name}: channel {config.channel}, "
+            f"{mode} started for {profile.display_name}: {ADAPTER_NAMES[config.adapter]}, "
+            f"channel {config.channel}, "
             f"{format_bitrate(config.bitrate)}, "
             f"request 0x{config.request_id:X}, update 0x{config.update_id:X}"
         )
         self._append_log(f"Raw CAN traffic: {config.can_log}")
         self.statusBar().showMessage(f"{mode} running")
         self._set_running(True)
-        self._process.setWorkingDirectory(str(cli_path.parent.parent))
+        self._process.setWorkingDirectory(str(working_directory))
         self._process.start(str(program), arguments)
 
     def _set_running(self, running: bool) -> None:

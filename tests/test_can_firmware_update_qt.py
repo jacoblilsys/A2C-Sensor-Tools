@@ -3,7 +3,9 @@ from unittest.mock import patch
 from pathlib import Path
 
 try:
+    from PySide6.QtWidgets import QApplication
     from a2c_sensor_tools.can_firmware_update_qt import (
+        FirmwareUpdaterWindow,
         UpdateConfiguration,
         UpdateOutputParser,
         build_update_arguments,
@@ -19,6 +21,10 @@ else:
 
 @unittest.skipIf(QT_IMPORT_ERROR is not None, f"Qt 6 unavailable: {QT_IMPORT_ERROR}")
 class FirmwareUpdaterQtTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.application = QApplication.instance() or QApplication([])
+
     def test_can_id_accepts_expected_notation(self) -> None:
         self.assertEqual(parse_standard_can_id("1000"), 0x3E8)
         self.assertEqual(parse_standard_can_id("0x3E8"), 0x3E8)
@@ -35,6 +41,7 @@ class FirmwareUpdaterQtTests(unittest.TestCase):
     def test_cli_arguments_include_selected_bus_and_ids(self) -> None:
         config = UpdateConfiguration(
             image=Path("firmware.binenc"),
+            adapter="kvaser",
             channel=2,
             bitrate=500_000,
             sample_point="75",
@@ -46,10 +53,40 @@ class FirmwareUpdaterQtTests(unittest.TestCase):
         )
         arguments = build_update_arguments(config, dry_run=False)
         self.assertIn("--yes", arguments)
+        self.assertEqual(arguments[arguments.index("--adapter") + 1], "kvaser")
         self.assertIn("500000", arguments)
         self.assertIn("0x125", arguments)
         self.assertIn("--allow-same-or-older", arguments)
         self.assertNotIn("--standalone", arguments)
+
+    def test_cli_arguments_include_peak_adapter_and_handle(self) -> None:
+        config = UpdateConfiguration(
+            image=Path("firmware.binenc"),
+            adapter="peak",
+            channel=0x51,
+            bitrate=250_000,
+            sample_point="87.5",
+            request_id=0x3E8,
+            update_id=0x3E8,
+            response_id=None,
+            allow_same_or_older=False,
+            can_log=Path("traffic.log"),
+        )
+        arguments = build_update_arguments(config, dry_run=True)
+        self.assertEqual(arguments[arguments.index("--adapter") + 1], "peak")
+        self.assertEqual(arguments[arguments.index("--channel") + 1], "81")
+        self.assertIn("--dry-run", arguments)
+
+    def test_peak_selection_disables_kvaser_sample_point(self) -> None:
+        with patch.object(FirmwareUpdaterWindow, "refresh_channels"):
+            window = FirmwareUpdaterWindow()
+            peak_index = window.adapter_combo.findData("peak")
+            kvaser_index = window.adapter_combo.findData("kvaser")
+            window.adapter_combo.setCurrentIndex(peak_index)
+            self.assertFalse(window.sample_point_combo.isEnabled())
+            window.adapter_combo.setCurrentIndex(kvaser_index)
+            self.assertTrue(window.sample_point_combo.isEnabled())
+            window.close()
 
     def test_progress_parser_handles_carriage_return_chunks(self) -> None:
         parser = UpdateOutputParser()

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # Copyright 2026 A2C
 # SPDX-License-Identifier: Apache-2.0
-"""Inspect and update A2C-IMU V2 firmware through a Kvaser CAN adapter.
+"""Inspect and update A2C-IMU V2 firmware through a supported CAN adapter.
 
-The CAN transport uses Kvaser's installed canlib32.dll through the small
-ctypes wrapper in can_sensor_monitor.py. Firmware package creation and
-empty-flash factory recovery intentionally remain in A2C's private tooling.
+The CAN transport uses the adapter vendor's installed Windows DLL. Firmware
+package creation and empty-flash factory recovery intentionally remain in
+A2C's private tooling.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ try:
         SUPPORTED_BITRATES,
         parse_integer,
     )
+    from .pcan_basic import PcanBasic, PcanError
 except ImportError:  # Direct execution from the Tools directory.
     from can_sensor_monitor import (  # type: ignore
         CanFrame,
@@ -36,6 +37,7 @@ except ImportError:  # Direct execution from the Tools directory.
         SUPPORTED_BITRATES,
         parse_integer,
     )
+    from pcan_basic import PcanBasic, PcanError  # type: ignore
 
 
 FLASH_SIZE = 0x32000
@@ -537,17 +539,30 @@ def command_update(args: argparse.Namespace) -> int:
             "update erases the sensor's external firmware image; inspect the summary, then pass --yes"
         )
 
-    api = KvaserCanlib(args.dll)
+    if args.adapter == "peak":
+        api = PcanBasic(args.dll)
+        adapter_name = "PEAK PCAN-Basic"
+        adapter_detail = f"PCAN-Basic API {api.api_version()}"
+    else:
+        api = KvaserCanlib(args.dll)
+        adapter_name = "Kvaser CANlib"
+        adapter_detail = "Kvaser CANlib"
     channels = api.list_channels()
     selected = next((item for item in channels if item.number == args.channel), None)
     if selected is None:
-        raise FirmwareUpdateError(f"Kvaser channel {args.channel} does not exist")
+        raise FirmwareUpdateError(
+            f"{adapter_name} channel {args.channel} does not exist or is not attached"
+        )
 
     print(
         f"Target package 0x{inspection.program.version:X} for hardware "
         f"0x{inspection.program.hardware:08X}; {PAGE_COUNT} pages"
     )
-    print(f"CAN: {selected.name}, {args.bitrate} bit/s, request ID 0x{args.request_id:X}")
+    print(
+        f"CAN: {adapter_name}, {selected.name}, {args.bitrate} bit/s, "
+        f"request ID 0x{args.request_id:X}"
+    )
+    print(f"Adapter API: {adapter_detail}")
     print(
         f"Bootloader control ID: 0x{args.update_id:X} (application-entered mode)"
     )
@@ -565,9 +580,11 @@ def command_update(args: argparse.Namespace) -> int:
     ) as raw_can_channel:
         traffic_log.write(
             "# A2C firmware update CAN traffic\n"
-            "# Kvaser output mode: CAN_DRIVER_NORMAL (active ACK/transmit)\n"
+            f"# Adapter: {adapter_name}; API: {adapter_detail}\n"
+            "# CAN mode: normal/active (ACK and transmit enabled)\n"
             "# Host acceptance filters: none configured\n"
-            f"# Channel: {args.channel}; bitrate: {args.bitrate}; sample point: {args.sample_point}\n"
+            f"# Channel: {selected.name} ({args.channel}); bitrate: {args.bitrate}; "
+            f"sample point: {'vendor preset' if args.adapter == 'peak' else args.sample_point}\n"
         )
         can_channel = TrafficLoggingChannel(raw_can_channel, traffic_log)
         updater = FirmwareUpdater(
@@ -655,7 +672,18 @@ def command_update(args: argparse.Namespace) -> int:
 
 
 def _add_common_can_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--channel", type=int, default=0, help="Kvaser channel (default: 0)")
+    parser.add_argument(
+        "--adapter",
+        choices=("kvaser", "peak"),
+        default="kvaser",
+        help="CAN adapter backend (default: kvaser)",
+    )
+    parser.add_argument(
+        "--channel",
+        type=parse_integer,
+        default=0,
+        help="Kvaser channel number or PEAK PCAN handle, e.g. 0x51",
+    )
     parser.add_argument(
         "--bitrate",
         type=int,
@@ -669,7 +697,9 @@ def _add_common_can_arguments(parser: argparse.ArgumentParser) -> None:
         default="87.5",
         help="CAN sample point in percent (default: 87.5)",
     )
-    parser.add_argument("--dll", help="optional path to canlib32.dll")
+    parser.add_argument(
+        "--dll", help="optional path to canlib32.dll or PCANBasic.dll"
+    )
     parser.add_argument(
         "--request-id",
         type=parse_integer,
@@ -694,7 +724,7 @@ def _add_common_can_arguments(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Inspect and update A2C-IMU V2 firmware over Kvaser CAN."
+        description="Inspect and update A2C-IMU V2 firmware over Kvaser or PEAK CAN."
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -752,7 +782,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.handler(args)
-    except (FirmwareUpdateError, KvaserError, OSError, ValueError) as exc:
+    except (FirmwareUpdateError, KvaserError, PcanError, OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
