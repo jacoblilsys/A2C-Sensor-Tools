@@ -60,8 +60,14 @@ CMD_ERASE_DONE = 0xEA
 CMD_IMAGE_CRC = 0xF5
 CMD_EXIT = 0xFE
 CMD_INFO = 0xEF
+CMD_SET_PERIODIC_TASK = 0x52
 
 PAGE_PROGRAMMED = 0xA7
+PERIODIC_TASK_COUNT = 8
+TRAFFIC_SAMPLE_MS = 250
+ESTIMATED_CLASSIC_CAN_BITS_PER_FRAME = 125
+HIGH_TRAFFIC_UTILIZATION = 0.50
+VERIFICATION_INCONCLUSIVE_EXIT_CODE = 2
 
 
 def default_can_log_path(image: Path, stamp: str, process_id: int) -> Path:
@@ -76,6 +82,10 @@ def default_can_log_path(image: Path, stamp: str, process_id: int) -> Path:
 
 class FirmwareUpdateError(RuntimeError):
     """The image or bootloader protocol failed a safety check."""
+
+
+class FirmwareVerificationInconclusive(FirmwareUpdateError):
+    """Programming passed, but the restarted application could not be verified."""
 
 
 @dataclass(frozen=True)
@@ -282,6 +292,37 @@ class FirmwareUpdater:
             count += 1
         return count
 
+    def observe_traffic(self, duration_ms: int = TRAFFIC_SAMPLE_MS) -> tuple[int, int, float]:
+        """Count all frames and frames from this sensor over a fixed interval."""
+        if duration_ms <= 0:
+            raise ValueError("traffic observation duration must be positive")
+        started = time.monotonic()
+        deadline = started + duration_ms / 1000.0
+        total = 0
+        sensor = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            frame = self.channel.read(min(10, max(1, int(remaining * 1000))))
+            if frame is None:
+                continue
+            total += 1
+            if self.response_id is not None and frame.can_id == self.response_id:
+                sensor += 1
+        return total, sensor, max(time.monotonic() - started, 0.001)
+
+    def disable_periodic_tasks(self, task_count: int = PERIODIC_TASK_COUNT) -> int:
+        """Disable application periodic slots in RAM before entering bootloader."""
+        for task in range(1, task_count + 1):
+            self.channel.write(
+                self.request_id,
+                bytes((CMD_SET_PERIODIC_TASK, task, 0, 0, 0, 0, 0, 0)),
+            )
+            if self.frame_delay:
+                time.sleep(min(self.frame_delay, 0.020))
+        return self.drain(quiet_ms=25, maximum_ms=1000)
+
     def _wait_for(
         self,
         predicate: Callable[[CanFrame], bool],
@@ -337,6 +378,30 @@ class FirmwareUpdater:
         if self.response_id is None:
             self.response_id = frame.can_id
         return int.from_bytes(frame.data[2:6], "big"), frame.can_id
+
+    def query_information_with_retry(
+        self, item: int, timeout: float, attempt_timeout: float = 0.5
+    ) -> tuple[int, int]:
+        deadline = time.monotonic() + timeout
+        last_communication_error: Optional[Exception] = None
+        while time.monotonic() < deadline:
+            try:
+                return self.query_information(
+                    item,
+                    min(attempt_timeout, max(0.05, deadline - time.monotonic())),
+                )
+            except (FirmwareUpdateError, KvaserError, PcanError) as exc:
+                last_communication_error = exc
+                time.sleep(min(0.10, max(0.0, deadline - time.monotonic())))
+        detail = (
+            f"; last communication error: {last_communication_error}"
+            if last_communication_error is not None
+            else ""
+        )
+        raise FirmwareUpdateError(
+            f"sensor-information item 0x{item:02X} was not received within "
+            f"{timeout:g} seconds{detail}"
+        )
 
     def enter(self, timeout: float) -> int:
         self.drain()
@@ -469,11 +534,12 @@ class FirmwareUpdater:
 
     def wait_for_firmware(self, version: int, timeout: float) -> int:
         deadline = time.monotonic() + timeout
+        last_communication_error: Optional[Exception] = None
         while time.monotonic() < deadline:
-            self.channel.write(
-                self.request_id, bytes((CMD_INFO, 0x04, 0, 0, 0, 0, 0, 0))
-            )
             try:
+                self.channel.write(
+                    self.request_id, bytes((CMD_INFO, 0x04, 0, 0, 0, 0, 0, 0))
+                )
                 frame = self._wait_for(
                     lambda rx: len(rx.data) >= 6
                     and rx.data[0] == CMD_INFO
@@ -482,15 +548,23 @@ class FirmwareUpdater:
                     "application firmware version",
                     any_response_id=True,
                 )
-            except FirmwareUpdateError:
+            except (FirmwareUpdateError, KvaserError, PcanError) as exc:
+                last_communication_error = exc
+                time.sleep(min(0.10, max(0.0, deadline - time.monotonic())))
                 continue
             reported = int.from_bytes(frame.data[2:6], "big")
             if reported == version:
                 self.response_id = frame.can_id
                 return frame.can_id
             time.sleep(0.25)
+        detail = (
+            f"; last communication error: {last_communication_error}"
+            if last_communication_error is not None
+            else ""
+        )
         raise FirmwareUpdateError(
             f"application did not report firmware 0x{version:X} within {timeout:g} seconds"
+            f"{detail}"
         )
 
 
@@ -616,6 +690,30 @@ def command_update(args: argparse.Namespace) -> int:
             print("Dry run complete; no bootloader command or erase was sent")
             return 0
 
+        total_frames, sensor_frames, observed_seconds = updater.observe_traffic()
+        sensor_rate = sensor_frames / observed_seconds
+        estimated_capacity = args.bitrate / ESTIMATED_CLASSIC_CAN_BITS_PER_FRAME
+        estimated_utilization = sensor_rate / estimated_capacity
+        print(
+            f"Observed {sensor_frames} sensor frames ({sensor_rate:.0f} frame/s) "
+            f"during a {observed_seconds:.2f} s pre-update sample"
+        )
+        if estimated_utilization >= HIGH_TRAFFIC_UTILIZATION:
+            print(
+                "WARNING: sensor traffic is using an estimated "
+                f"{estimated_utilization * 100:.0f}% of nominal CAN capacity; "
+                "temporarily silencing periodic output"
+            )
+        elif total_frames > sensor_frames:
+            print(
+                f"Observed {total_frames - sensor_frames} additional frame(s) from other CAN IDs"
+            )
+        drained = updater.disable_periodic_tasks()
+        print(
+            "Periodic application slots disabled in RAM for the update; saved settings "
+            f"are unchanged ({drained} queued frame(s) drained)"
+        )
+
         welcome_id = updater.enter(args.enter_timeout)
         print(f"Bootloader WELCOME received on CAN ID 0x{welcome_id:X}")
         updater.erase(args.erase_timeout)
@@ -645,12 +743,19 @@ def command_update(args: argparse.Namespace) -> int:
         print(f"External-flash transport CRC verified ({scope})")
         updater.exit()
         print("Reset requested; waiting for the application")
-        response_id = updater.wait_for_firmware(
-            inspection.program.version, args.reboot_timeout
-        )
-        installed_crc, crc_response_id = updater.query_information(
-            0x07, args.query_timeout
-        )
+        try:
+            response_id = updater.wait_for_firmware(
+                inspection.program.version, args.reboot_timeout
+            )
+            installed_crc, crc_response_id = updater.query_information_with_retry(
+                0x07, args.query_timeout
+            )
+        except (FirmwareUpdateError, KvaserError, PcanError) as exc:
+            raise FirmwareVerificationInconclusive(
+                "programming and external-flash CRC verification succeeded, but final "
+                f"application verification was inconclusive: {exc}. Power-cycle the "
+                "sensor and run Check Sensor before attempting another update"
+            ) from exc
         if crc_response_id != response_id:
             raise FirmwareUpdateError(
                 f"application CRC response moved from CAN ID 0x{response_id:X} "
@@ -782,6 +887,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.handler(args)
+    except FirmwareVerificationInconclusive as exc:
+        print(f"VERIFICATION INCONCLUSIVE: {exc}", file=sys.stderr)
+        return VERIFICATION_INCONCLUSIVE_EXIT_CODE
     except (FirmwareUpdateError, KvaserError, PcanError, OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

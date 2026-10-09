@@ -6,7 +6,8 @@ from unittest.mock import patch
 from pathlib import Path
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QProcess
+    from PySide6.QtWidgets import QApplication, QMessageBox
     from a2c_sensor_tools.can_firmware_update_qt import (
         FirmwareUpdaterWindow,
         UpdateConfiguration,
@@ -113,6 +114,22 @@ class FirmwareUpdaterQtTests(unittest.TestCase):
             window.adapter_combo.setCurrentIndex(kvaser_index)
             self.assertTrue(window.sample_point_combo.isEnabled())
             window.close()
+
+    def test_inconclusive_verification_is_a_warning_not_failed_programming(self) -> None:
+        with patch.object(FirmwareUpdaterWindow, "refresh_channels"):
+            window = FirmwareUpdaterWindow()
+        window._dry_run = False
+        with (
+            patch.object(QMessageBox, "warning") as warning,
+            patch.object(QMessageBox, "critical") as critical,
+        ):
+            window._process_finished(2, QProcess.ExitStatus.NormalExit)
+
+        self.assertEqual(window.progress_bar.value(), 100)
+        self.assertIn("verify sensor", window.progress_bar.format().lower())
+        warning.assert_called_once()
+        critical.assert_not_called()
+        window.close()
 
     def test_progress_parser_handles_carriage_return_chunks(self) -> None:
         parser = UpdateOutputParser()

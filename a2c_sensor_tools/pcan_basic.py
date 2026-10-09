@@ -41,9 +41,23 @@ PCAN_USBBUS_HANDLES = (
 )
 
 PCAN_ERROR_OK = 0x00000
+PCAN_ERROR_OVERRUN = 0x00002
+PCAN_ERROR_BUSLIGHT = 0x00004
+PCAN_ERROR_BUSHEAVY = 0x00008
+PCAN_ERROR_BUSOFF = 0x00010
 PCAN_ERROR_QRCVEMPTY = 0x00020
+PCAN_ERROR_BUSPASSIVE = 0x40000
+
+PCAN_RECOVERABLE_READ_STATUS = (
+    PCAN_ERROR_OVERRUN
+    | PCAN_ERROR_BUSLIGHT
+    | PCAN_ERROR_BUSHEAVY
+    | PCAN_ERROR_BUSOFF
+    | PCAN_ERROR_BUSPASSIVE
+)
 
 PCAN_API_VERSION = 0x05
+PCAN_BUSOFF_AUTORESET = 0x07
 PCAN_CHANNEL_CONDITION = 0x0D
 PCAN_CHANNEL_UNAVAILABLE = 0x00
 PCAN_CHANNEL_AVAILABLE = 0x01
@@ -55,6 +69,7 @@ PCAN_MESSAGE_RTR = 0x01
 PCAN_MESSAGE_EXTENDED = 0x02
 PCAN_MESSAGE_ERRFRAME = 0x40
 PCAN_MESSAGE_STATUS = 0x80
+PCAN_PARAMETER_ON = 0x01
 
 PCAN_BAUDRATES = {
     50_000: 0x472F,
@@ -122,6 +137,10 @@ class PcanBasic:
             ct.c_uint16, ct.c_ubyte, ct.c_void_p, ct.c_uint32,
         )
         self._dll.CAN_GetValue.restype = ct.c_uint32
+        self._dll.CAN_SetValue.argtypes = (
+            ct.c_uint16, ct.c_ubyte, ct.c_void_p, ct.c_uint32,
+        )
+        self._dll.CAN_SetValue.restype = ct.c_uint32
         self._dll.CAN_GetErrorText.argtypes = (
             ct.c_uint32, ct.c_uint16, ct.c_char_p,
         )
@@ -197,7 +216,21 @@ class PcanBasic:
             self._dll.CAN_Initialize(channel, pcan_bitrate, 0, 0, 0),
             f"CAN_Initialize(PCAN handle 0x{channel:X})",
         )
-        return PcanChannel(self, channel)
+        try:
+            enabled = ct.c_uint32(PCAN_PARAMETER_ON)
+            self.check(
+                self._dll.CAN_SetValue(
+                    channel,
+                    PCAN_BUSOFF_AUTORESET,
+                    ct.byref(enabled),
+                    ct.sizeof(enabled),
+                ),
+                "CAN_SetValue(PCAN_BUSOFF_AUTORESET)",
+            )
+            return PcanChannel(self, channel)
+        except Exception:
+            self._dll.CAN_Uninitialize(channel)
+            raise
 
 
 class PcanChannel:
@@ -247,7 +280,19 @@ class PcanChannel:
             status = self._api._dll.CAN_Read(
                 self._handle, ct.byref(message), ct.byref(timestamp)
             )
-            if status == PCAN_ERROR_OK:
+            recoverable_status = status & PCAN_RECOVERABLE_READ_STATUS
+            unexpected_status = status & ~(
+                PCAN_RECOVERABLE_READ_STATUS | PCAN_ERROR_QRCVEMPTY
+            )
+            if unexpected_status:
+                self._api.check(status, "CAN_Read")
+            if status & PCAN_ERROR_QRCVEMPTY:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                time.sleep(min(0.001, remaining))
+                continue
+            if status == PCAN_ERROR_OK or recoverable_status:
                 flags = CAN_MSG_EXT if message.MSGTYPE & PCAN_MESSAGE_EXTENDED else CAN_MSG_STD
                 if message.MSGTYPE & PCAN_MESSAGE_RTR:
                     flags |= CAN_MSG_RTR
@@ -260,8 +305,6 @@ class PcanChannel:
                     flags=flags,
                     timestamp_ms=timestamp_ms,
                 )
-            if status != PCAN_ERROR_QRCVEMPTY:
-                self._api.check(status, "CAN_Read")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None

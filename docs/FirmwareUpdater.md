@@ -19,6 +19,12 @@ During an update it checks every transferred page, verifies the complete
 transport CRC, restarts the sensor, reads the installed version and CRC, and
 reports success only when they match the selected package.
 
+Immediately before entering the bootloader, the updater measures current CAN
+traffic and disables all sensor periodic-message slots in volatile RAM. Saved
+periodic settings are not changed and are loaded again when the sensor restarts.
+This prevents an old sensor transmit backlog or high-rate periodic stream from
+competing with the bootloader transfer.
+
 ## Normal workflow
 
 1. Connect only the sensor being updated.
@@ -38,6 +44,18 @@ The CAN channel always operates in normal/active mode. The updater installs
 no host acceptance filter and records all observed CAN traffic during the
 operation. By default, logs are written below
 `%LOCALAPPDATA%\A2C\SensorTools\logs`.
+
+For PEAK adapters, recoverable PCAN bus-warning, bus-heavy, overrun, and
+bus-off status frames are retained in the raw CAN log instead of immediately
+aborting the update. PEAK automatic bus-off reset is enabled when the channel
+is opened.
+
+If programming and the transport CRC succeed but the restarted application
+cannot be verified, the command exits with code `2` and the GUI reports
+**Programmed — verify sensor**. This is not reported as an erase/programming
+failure. Power-cycle the sensor and use **Check Sensor** before attempting
+another update. A normal confirmed update exits with `0`; a failure before or
+during programming exits with `1`.
 
 ## Command-line use
 

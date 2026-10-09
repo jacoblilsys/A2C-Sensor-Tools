@@ -1,15 +1,19 @@
 import ctypes as ct
 import unittest
 
-from a2c_sensor_tools.can_sensor_monitor import CAN_MSG_EXT
+from a2c_sensor_tools.can_sensor_monitor import CAN_MSG_ERROR_FRAME, CAN_MSG_EXT
 from a2c_sensor_tools.pcan_basic import (
     PCAN_API_VERSION,
     PCAN_BAUDRATES,
+    PCAN_BUSOFF_AUTORESET,
     PCAN_CHANNEL_AVAILABLE,
     PCAN_CHANNEL_CONDITION,
+    PCAN_ERROR_BUSHEAVY,
     PCAN_ERROR_OK,
     PCAN_ERROR_QRCVEMPTY,
     PCAN_MESSAGE_EXTENDED,
+    PCAN_MESSAGE_STATUS,
+    PCAN_PARAMETER_ON,
     PCAN_USBBUS_HANDLES,
     PcanBasic,
     TPCANMsg,
@@ -31,6 +35,7 @@ class _FakePcanDll:
     def __init__(self) -> None:
         self.initialized = []
         self.uninitialized = []
+        self.set_values = []
         self.writes = []
         self.read_items = []
         self.CAN_Initialize = _FakeFunction(self._initialize)
@@ -38,6 +43,7 @@ class _FakePcanDll:
         self.CAN_Read = _FakeFunction(self._read)
         self.CAN_Write = _FakeFunction(self._write)
         self.CAN_GetValue = _FakeFunction(self._get_value)
+        self.CAN_SetValue = _FakeFunction(self._set_value)
         self.CAN_GetErrorText = _FakeFunction(self._get_error_text)
 
     def _initialize(self, channel, bitrate, deprecated1, deprecated2, deprecated3):
@@ -65,6 +71,11 @@ class _FakePcanDll:
         ct.memmove(buffer, b"fake error\0", 11)
         return PCAN_ERROR_OK
 
+    def _set_value(self, channel, parameter, buffer, length):
+        value = ct.cast(buffer, ct.POINTER(ct.c_uint32)).contents.value
+        self.set_values.append((channel, parameter, value, length))
+        return PCAN_ERROR_OK
+
     def _write(self, channel, message_pointer):
         message = ct.cast(message_pointer, ct.POINTER(TPCANMsg)).contents
         self.writes.append(
@@ -76,7 +87,12 @@ class _FakePcanDll:
         del channel
         if not self.read_items:
             return PCAN_ERROR_QRCVEMPTY
-        can_id, message_type, data, millis = self.read_items.pop(0)
+        item = self.read_items.pop(0)
+        if len(item) == 4:
+            status = PCAN_ERROR_OK
+            can_id, message_type, data, millis = item
+        else:
+            status, can_id, message_type, data, millis = item
         message = ct.cast(message_pointer, ct.POINTER(TPCANMsg)).contents
         message.ID = can_id
         message.MSGTYPE = message_type
@@ -87,7 +103,7 @@ class _FakePcanDll:
             timestamp_pointer, ct.POINTER(TPCANTimestamp)
         ).contents
         timestamp.millis = millis
-        return PCAN_ERROR_OK
+        return status
 
 
 class PcanBasicTests(unittest.TestCase):
@@ -109,6 +125,10 @@ class PcanBasicTests(unittest.TestCase):
             frame = channel.read(0)
 
         self.assertEqual(self.dll.initialized, [(0x51, PCAN_BAUDRATES[250_000], 0, 0, 0)])
+        self.assertEqual(
+            self.dll.set_values,
+            [(0x51, PCAN_BUSOFF_AUTORESET, PCAN_PARAMETER_ON, 4)],
+        )
         self.assertEqual(self.dll.writes, [(0x51, 0x3E8, 0, b"\xEF\x04")])
         self.assertIsNotNone(frame)
         assert frame is not None
@@ -121,6 +141,69 @@ class PcanBasicTests(unittest.TestCase):
     def test_empty_receive_queue_returns_none(self) -> None:
         with self.api.open_channel(0x51, 500_000) as channel:
             self.assertIsNone(channel.read(0))
+
+    def test_bus_warning_returns_logged_error_frame_instead_of_raising(self) -> None:
+        self.dll.read_items.append(
+            (
+                PCAN_ERROR_BUSHEAVY,
+                0,
+                PCAN_MESSAGE_STATUS,
+                bytes((0, 0, 0, PCAN_ERROR_BUSHEAVY)),
+                5678,
+            )
+        )
+        with self.api.open_channel(0x51, 250_000) as channel:
+            frame = channel.read(0)
+
+        self.assertIsNotNone(frame)
+        assert frame is not None
+        self.assertTrue(frame.flags & CAN_MSG_ERROR_FRAME)
+        self.assertEqual(frame.data, b"\x00\x00\x00\x08")
+        self.assertEqual(frame.timestamp_ms, 5678)
+
+    def test_read_continues_after_bus_warning(self) -> None:
+        self.dll.read_items.extend(
+            (
+                (
+                    PCAN_ERROR_BUSHEAVY,
+                    0,
+                    PCAN_MESSAGE_STATUS,
+                    bytes((0, 0, 0, PCAN_ERROR_BUSHEAVY)),
+                    5678,
+                ),
+                (0x123, 0, b"\xEF\x04\x00\x00\x01\x32", 5680),
+            )
+        )
+        with self.api.open_channel(0x51, 250_000) as channel:
+            warning = channel.read(0)
+            response = channel.read(0)
+
+        self.assertIsNotNone(warning)
+        assert warning is not None
+        self.assertTrue(warning.flags & CAN_MSG_ERROR_FRAME)
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response.can_id, 0x123)
+        self.assertEqual(response.data, b"\xEF\x04\x00\x00\x01\x32")
+
+    def test_valid_message_buffer_is_kept_when_read_reports_bus_warning(self) -> None:
+        self.dll.read_items.append(
+            (
+                PCAN_ERROR_BUSHEAVY,
+                0x123,
+                0,
+                b"\xEF\x04\x00\x00\x01\x32",
+                5680,
+            )
+        )
+        with self.api.open_channel(0x51, 250_000) as channel:
+            response = channel.read(0)
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertFalse(response.flags & CAN_MSG_ERROR_FRAME)
+        self.assertEqual(response.can_id, 0x123)
+        self.assertEqual(response.data, b"\xEF\x04\x00\x00\x01\x32")
 
 
 if __name__ == "__main__":

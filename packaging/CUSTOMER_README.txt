@@ -37,6 +37,12 @@ For remote support, retain the visible application log and the complete raw
 CAN log. The raw log records the PCAN-Basic API version, selected channel,
 bitrate, and all unfiltered CAN traffic.
 
+If the application reports "Programmed - verify sensor", the firmware transfer
+and transport CRC succeeded but the restarted application was not confirmed.
+Power-cycle the sensor and press Check Sensor before attempting another update.
+The updater temporarily disables periodic output only in RAM during an update;
+saved sensor settings are unchanged.
+
 This PEAK build is pending validation with physical PEAK hardware. The
 executables are not code-signed, so Windows may show a SmartScreen warning.
 

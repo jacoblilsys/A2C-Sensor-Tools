@@ -1,5 +1,6 @@
 import io
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -11,15 +12,18 @@ from a2c_sensor_tools.can_firmware_update import (
     FLASH_SIZE,
     FirmwareUpdater,
     FirmwareUpdateError,
+    FirmwareVerificationInconclusive,
     INFO_SIZE,
     PROGRAM_START,
     TrafficLoggingChannel,
     build_parser,
     default_can_log_path,
     inspect_package,
+    main,
     stm32_crc,
 )
 from a2c_sensor_tools.can_sensor_monitor import CanFrame
+from a2c_sensor_tools.pcan_basic import PcanError
 
 
 def metadata(version: int, crc: int) -> bytes:
@@ -132,6 +136,71 @@ class FirmwareUpdaterProtocolTests(unittest.TestCase):
         log = stream.getvalue()
         self.assertIn("TX STD ID=0x3E8 DLC=2", log)
         self.assertIn("RX STD ID=0x125 DLC=5", log)
+
+    def test_periodic_slots_are_disabled_only_in_volatile_ram(self) -> None:
+        channel = _EraseChannel()
+        channel.responses.clear()
+        updater = FirmwareUpdater(channel, 0x3E8, 0x3E8, 0x125, 0.0)
+        with patch.object(updater, "drain", return_value=17) as drain:
+            drained = updater.disable_periodic_tasks()
+
+        self.assertEqual(drained, 17)
+        self.assertEqual(len(channel.writes), 8)
+        for task, (can_id, payload) in enumerate(channel.writes, start=1):
+            self.assertEqual(can_id, 0x3E8)
+            self.assertEqual(payload, bytes((0x52, task, 0, 0, 0, 0, 0, 0)))
+        drain.assert_called_once_with(quiet_ms=25, maximum_ms=1000)
+
+    def test_reboot_poll_retries_transient_adapter_error(self) -> None:
+        class RecoveryChannel:
+            def __init__(self) -> None:
+                self.writes = 0
+                self.response_ready = False
+
+            def write(self, _can_id: int, _data: bytes, _extended: bool = False) -> None:
+                self.writes += 1
+                if self.writes == 1:
+                    raise PcanError("temporary bus warning")
+                self.response_ready = True
+
+            def read(self, _timeout_ms: int):
+                if not self.response_ready:
+                    return None
+                self.response_ready = False
+                return CanFrame(0x123, bytes((0xEF, 0x04, 0, 0, 0x01, 0x32)))
+
+        channel = RecoveryChannel()
+        updater = FirmwareUpdater(channel, 0x3E8, 0x3E8, None, 0.0)
+        with patch("a2c_sensor_tools.can_firmware_update.time.sleep"):
+            response_id = updater.wait_for_firmware(0x132, 0.5)
+
+        self.assertEqual(response_id, 0x123)
+        self.assertEqual(channel.writes, 2)
+
+    def test_information_query_retries_transient_adapter_error(self) -> None:
+        channel = _EraseChannel()
+        channel.responses.clear()
+        updater = FirmwareUpdater(channel, 0x3E8, 0x3E8, 0x123, 0.0)
+        with patch.object(
+            updater,
+            "query_information",
+            side_effect=[PcanError("temporary bus warning"), (0x89ABCDEF, 0x123)],
+        ) as query, patch("a2c_sensor_tools.can_firmware_update.time.sleep"):
+            result = updater.query_information_with_retry(0x07, 0.5)
+
+        self.assertEqual(result, (0x89ABCDEF, 0x123))
+        self.assertEqual(query.call_count, 2)
+
+    def test_inconclusive_verification_has_distinct_exit_code(self) -> None:
+        def handler(_args):
+            raise FirmwareVerificationInconclusive("final check unavailable")
+
+        parser = unittest.mock.Mock()
+        parser.parse_args.return_value = SimpleNamespace(handler=handler)
+        with patch(
+            "a2c_sensor_tools.can_firmware_update.build_parser", return_value=parser
+        ):
+            self.assertEqual(main([]), 2)
 
 if __name__ == "__main__":
     unittest.main()

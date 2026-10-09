@@ -68,6 +68,7 @@ except ImportError:  # Direct execution from the Tools directory.
 APP_TITLE = "A2C Sensor Firmware Updater"
 DEFAULT_REQUEST_ID = 0x3E8
 DEFAULT_PROGRESS_MAXIMUM = 100
+VERIFICATION_INCONCLUSIVE_EXIT_CODE = 2
 PROGRESS_PATTERN = re.compile(r"Programming\s+(\d+)/(\d+)\s+pages")
 ADAPTER_NAMES = {
     "kvaser": "Kvaser CANlib",
@@ -688,6 +689,11 @@ class FirmwareUpdaterWindow(QMainWindow):
         for line in self._output_parser.flush():
             self._handle_process_line(line)
         success = exit_status == QProcess.ExitStatus.NormalExit and exit_code == 0
+        verification_inconclusive = (
+            exit_status == QProcess.ExitStatus.NormalExit
+            and exit_code == VERIFICATION_INCONCLUSIVE_EXIT_CODE
+            and not self._dry_run
+        )
         self._set_running(False)
         if self._can_log_path is not None and self._can_log_path.exists():
             self.open_can_log_button.setEnabled(True)
@@ -701,6 +707,18 @@ class FirmwareUpdaterWindow(QMainWindow):
             self.statusBar().showMessage(message)
             if not self._dry_run:
                 QMessageBox.information(self, APP_TITLE, message)
+        elif verification_inconclusive:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(100)
+            self.progress_bar.setFormat("Programmed — verify sensor")
+            message = (
+                "Firmware programming and transport CRC verification completed, but "
+                "the restarted application could not be verified. Power-cycle the "
+                "sensor, then use Check Sensor before attempting another update."
+            )
+            self._append_log(message)
+            self.statusBar().showMessage("Programmed; final verification inconclusive")
+            QMessageBox.warning(self, APP_TITLE, message)
         else:
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
