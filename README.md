@@ -16,21 +16,19 @@ The repository contains two Qt 6 applications:
 
 - Windows 10 or Windows 11
 - Python 3.10 or newer when running from source
-- For the dashboard: a supported Kvaser CAN interface, the current
-  [Kvaser CANlib SDK](https://kvaser.com/canlib-sdk/), and the matching
-  [Kvaser Windows driver](https://kvaser.com/canlib-webhelp/section_install_windows.htm)
-- For the firmware updater: either the Kvaser setup above or a PEAK-System
-  PCAN-USB interface with the
+- For either application: a supported Kvaser CAN interface with the current
+  [Kvaser CANlib SDK](https://kvaser.com/canlib-sdk/) and matching
+  [Kvaser Windows driver](https://kvaser.com/canlib-webhelp/section_install_windows.htm),
+  or a PEAK-System PCAN-USB interface with the
   [PEAK Windows driver and PCAN-Basic API][pcan-basic]
 
 **The Kvaser CANlib SDK must install `canlib32.dll` before either application
-can use a CAN interface.** The A2C applications do not include or replace
+can use a Kvaser interface.** The A2C applications do not include or replace
 `canlib32.dll` or the Kvaser hardware driver.
 
 **PEAK support requires `PCANBasic.dll`, installed by PEAK's Windows driver/API
 package.** The DLL and hardware driver are not included in this repository.
-PEAK support currently applies to the firmware updater; dashboard support can
-be added after the updater transport has been validated on physical hardware.
+Both the dashboard and firmware updater support PEAK PCAN-USB channels.
 
 ## Install from source
 
@@ -69,6 +67,10 @@ section. PEAK channels are shown as `PCAN_USBBUS1` through `PCAN_USBBUS16`.
 The sample-point selector is disabled for PEAK because PCAN-Basic's classic-CAN
 bitrate presets define their own bit timing.
 
+The dashboard has the same adapter selector. It runs PEAK in normal/active
+mode with no host acceptance filters, and disables the sample-point selector
+because PCAN-Basic's classic-CAN bitrate presets define that timing.
+
 The equivalent PEAK command-line preflight is:
 
 ```powershell
@@ -101,8 +103,9 @@ python -m unittest discover -s tests -v
 
 The offline test suite does not open a physical CAN channel. It includes a fake
 PCAN-Basic DLL that verifies PEAK channel discovery, classic-CAN bitrate setup,
-framing, timestamps, error handling, and channel release. Physical PEAK
-hardware validation is still required.
+framing, timestamps, error handling, and channel release. PEAK firmware updates
+have also been validated on customer hardware; dashboard coverage is tested
+offline and uses the same PCAN transport.
 
 ## Build the Windows customer package
 

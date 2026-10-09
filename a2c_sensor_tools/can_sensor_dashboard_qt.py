@@ -80,6 +80,7 @@ try:
         decode_gyro_calibration_runtime,
         request_payload,
     )
+    from .pcan_basic import PcanBasic, PcanError
 except ImportError:  # Direct execution from the Tools directory.
     from a2c_app_support import APP_VERSION, install_help_menu  # type: ignore
     from can_sensor_monitor import (  # type: ignore
@@ -113,9 +114,14 @@ except ImportError:  # Direct execution from the Tools directory.
         decode_gyro_calibration_runtime,
         request_payload,
     )
+    from pcan_basic import PcanBasic, PcanError  # type: ignore
 
 
 APP_TITLE = "A2C IMU Dashboard"
+ADAPTER_NAMES = {
+    "kvaser": "Kvaser CANlib",
+    "peak": "PEAK PCAN-Basic",
+}
 
 PLOT_RENDER_INTERVAL_MS = 40
 LIVE_LABEL_INTERVAL_MS = 100
@@ -521,14 +527,25 @@ class PeriodicConfiguration:
         )
 
 
+def can_api_for_adapter(adapter: str):
+    if adapter == "peak":
+        return PcanBasic()
+    if adapter == "kvaser":
+        return KvaserCanlib()
+    raise ValueError(f"Unsupported CAN adapter: {adapter}")
+
+
 class CanWorker(QThread):
     frames_received = Signal(object)
     frame_transmitted = Signal(int, bytes, bool)
     connection_changed = Signal(bool, str)
     worker_error = Signal(str)
 
-    def __init__(self, channel_number: int, bitrate: int, sample_point: str) -> None:
+    def __init__(
+        self, adapter: str, channel_number: int, bitrate: int, sample_point: str
+    ) -> None:
         super().__init__()
+        self.adapter = adapter
         self.channel_number = channel_number
         self.bitrate = bitrate
         self.sample_point = sample_point
@@ -544,13 +561,18 @@ class CanWorker(QThread):
     def run(self) -> None:
         pending_frames: list[CanFrame] = []
         try:
-            api = KvaserCanlib()
+            api = can_api_for_adapter(self.adapter)
             channels = api.list_channels()
             selected = next((item for item in channels if item.number == self.channel_number), None)
             if selected is None:
-                raise KvaserError(f"Kvaser channel {self.channel_number} does not exist")
+                adapter_name = ADAPTER_NAMES[self.adapter]
+                raise RuntimeError(
+                    f"{adapter_name} channel 0x{self.channel_number:X} does not exist"
+                )
             with api.open_channel(self.channel_number, self.bitrate, self.sample_point) as channel:
-                self.connection_changed.emit(True, selected.name)
+                self.connection_changed.emit(
+                    True, f"{ADAPTER_NAMES[self.adapter]} — {selected.name}"
+                )
                 last_write = 0.0
                 last_batch = time.monotonic()
                 while not self._stop_event.is_set():
@@ -1115,6 +1137,7 @@ class SensorDashboard(QMainWindow):
         self._settings = QSettings("A2C", "IMUSensorDashboard")
         self._worker: Optional[CanWorker] = None
         self._connected = False
+        self._channel_by_adapter: dict[str, int] = {}
         self._decoder = SensorDecoder()
         self._frames_received = 0
         self._last_rate_count = 0
@@ -1213,8 +1236,13 @@ class SensorDashboard(QMainWindow):
 
         connection_group = QGroupBox("CAN connection")
         connection_layout = QHBoxLayout(connection_group)
+        self.adapter_combo = QComboBox()
+        for adapter, display_name in ADAPTER_NAMES.items():
+            self.adapter_combo.addItem(display_name, adapter)
+        self.adapter_combo.currentIndexChanged.connect(self._adapter_changed)
         self.channel_combo = QComboBox()
         self.channel_combo.setMinimumWidth(290)
+        self.channel_combo.currentIndexChanged.connect(self._channel_changed)
         self.refresh_channels_button = QPushButton("Refresh")
         self.refresh_channels_button.clicked.connect(self.refresh_channels)
         self.host_baud_combo = QComboBox()
@@ -1233,6 +1261,7 @@ class SensorDashboard(QMainWindow):
         self.connection_status.setStyleSheet("color: #a02020; font-weight: bold;")
 
         for label, widget in (
+            ("Adapter", self.adapter_combo),
             ("Channel", self.channel_combo),
             ("Bus baud", self.host_baud_combo),
             ("Sample", self.host_sample_combo),
@@ -1275,7 +1304,7 @@ class SensorDashboard(QMainWindow):
 
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage("Select a Kvaser channel and connect")
+        self.statusBar().showMessage("Select a CAN adapter and channel, then connect")
         self._connection_required = [
             self.refresh_all_button,
             self.save_flash_button,
@@ -1951,6 +1980,10 @@ class SensorDashboard(QMainWindow):
         return tab
 
     def _restore_settings(self) -> None:
+        adapter = str(self._settings.value("adapter", "kvaser"))
+        index = self.adapter_combo.findData(adapter)
+        if index >= 0:
+            self.adapter_combo.setCurrentIndex(index)
         bitrate = int(self._settings.value("bitrate", 250_000))
         index = self.host_baud_combo.findData(bitrate)
         if index >= 0:
@@ -1970,7 +2003,13 @@ class SensorDashboard(QMainWindow):
             self.restoreGeometry(geometry)
 
     def _save_settings(self) -> None:
-        self._settings.setValue("channel", self.channel_combo.currentData())
+        adapter = str(self.adapter_combo.currentData())
+        self._settings.setValue("adapter", adapter)
+        channel = self.channel_combo.currentData()
+        if channel is not None:
+            self._channel_by_adapter[adapter] = int(channel)
+        for saved_adapter, saved_channel in self._channel_by_adapter.items():
+            self._settings.setValue(f"channel_{saved_adapter}", saved_channel)
         self._settings.setValue("bitrate", self.host_baud_combo.currentData())
         self._settings.setValue("sample_point", self.host_sample_combo.currentData())
         self._settings.setValue("request_id", self.request_id_edit.text().strip())
@@ -1982,24 +2021,50 @@ class SensorDashboard(QMainWindow):
         )
         self._settings.setValue("geometry", self.saveGeometry())
 
+    def _apply_adapter_ui(self) -> None:
+        is_kvaser = self.adapter_combo.currentData() == "kvaser"
+        self.host_sample_combo.setEnabled(not self._connected and is_kvaser)
+        self.host_sample_combo.setToolTip(
+            "Kvaser bit timing sample point"
+            if is_kvaser
+            else "PEAK classic-CAN bitrate presets define the bit timing and sample point."
+        )
+
+    def _adapter_changed(self, _index: int) -> None:
+        self._apply_adapter_ui()
+        self.refresh_channels(show_error=False)
+
+    def _channel_changed(self, _index: int) -> None:
+        adapter = self.adapter_combo.currentData()
+        channel = self.channel_combo.currentData()
+        if adapter is not None and channel is not None:
+            self._channel_by_adapter[str(adapter)] = int(channel)
+
     def refresh_channels(self, show_error: bool = True) -> None:
-        previous = self.channel_combo.currentData()
+        adapter = str(self.adapter_combo.currentData())
+        adapter_name = ADAPTER_NAMES[adapter]
+        previous = self._channel_by_adapter.get(adapter)
         if previous is None:
-            previous = int(self._settings.value("channel", 0))
+            default_channel = 0 if adapter == "kvaser" else 0x51
+            saved = self._settings.value(f"channel_{adapter}")
+            if saved is None and adapter == "kvaser":
+                saved = self._settings.value("channel", default_channel)
+            previous = int(saved if saved is not None else default_channel)
         self.channel_combo.clear()
         try:
-            channels = KvaserCanlib().list_channels()
-        except Exception as exc:
-            self.channel_combo.addItem("Kvaser CANlib unavailable", None)
+            channels = can_api_for_adapter(adapter).list_channels()
+        except (KvaserError, PcanError, OSError, ValueError) as exc:
+            self.channel_combo.addItem(f"{adapter_name} unavailable", None)
             if show_error:
                 QMessageBox.warning(self, APP_TITLE, str(exc))
             return
         for channel in channels:
+            description = f" — {channel.description}" if channel.description else ""
             self.channel_combo.addItem(
-                f"{channel.number}: {channel.name} — {channel.description}", channel.number
+                f"{channel.name}{description}", channel.number
             )
         if not channels:
-            self.channel_combo.addItem("No Kvaser channels found", None)
+            self.channel_combo.addItem(f"No {adapter_name} channels found", None)
         index = self.channel_combo.findData(previous)
         self.channel_combo.setCurrentIndex(index if index >= 0 else 0)
 
@@ -2012,7 +2077,7 @@ class SensorDashboard(QMainWindow):
     def connect_can(self) -> None:
         channel = self.channel_combo.currentData()
         if channel is None:
-            QMessageBox.warning(self, APP_TITLE, "Select an available Kvaser channel")
+            QMessageBox.warning(self, APP_TITLE, "Select an available CAN channel")
             return
         try:
             parse_can_id(self.request_id_edit.text(), extended=self.request_extended_checkbox.isChecked())
@@ -2023,7 +2088,10 @@ class SensorDashboard(QMainWindow):
         self.connect_button.setEnabled(False)
         self.connection_status.setText("Connecting…")
         self._worker = CanWorker(
-            int(channel), int(self.host_baud_combo.currentData()), str(self.host_sample_combo.currentData())
+            str(self.adapter_combo.currentData()),
+            int(channel),
+            int(self.host_baud_combo.currentData()),
+            str(self.host_sample_combo.currentData()),
         )
         self._worker.frames_received.connect(self._handle_frames)
         self._worker.frame_transmitted.connect(self._handle_transmitted)
@@ -2063,12 +2131,13 @@ class SensorDashboard(QMainWindow):
             "color: #197032; font-weight: bold;" if connected else "color: #a02020; font-weight: bold;"
         )
         for widget in (
+            self.adapter_combo,
             self.channel_combo,
             self.refresh_channels_button,
             self.host_baud_combo,
-            self.host_sample_combo,
         ):
             widget.setEnabled(not connected)
+        self._apply_adapter_ui()
         self._set_connection_controls(connected)
         self._imu_mode_controls_changed()
         if connected:

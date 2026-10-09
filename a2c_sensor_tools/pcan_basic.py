@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 A2C
 # SPDX-License-Identifier: Apache-2.0
-"""Minimal PEAK PCAN-Basic binding used by the firmware updater.
+"""Minimal PEAK PCAN-Basic binding used by A2C Sensor Tools.
 
 PCANBasic.dll is supplied by PEAK's Windows driver/API installation and is
 not distributed with A2C Sensor Tools.

@@ -20,6 +20,7 @@ try:
         CMD_SET_VIBRATION_STREAM,
         CMD_SEND_ACCELERATION,
         CMD_SEND_COMBINED_AXIS,
+        CanWorker,
         CombinedAxisMeasurement,
         FILTER_STD_1_2,
         GYRO_CALIBRATION_TIMEOUT_MS,
@@ -50,7 +51,8 @@ try:
         u32_setting_payload,
         vibration_stream_payload,
     )
-    from a2c_sensor_tools.can_sensor_monitor import CanFrame
+    import a2c_sensor_tools.can_sensor_dashboard_qt as dashboard_module
+    from a2c_sensor_tools.can_sensor_monitor import CanFrame, ChannelInfo
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QMessageBox
 except ImportError as exc:
@@ -193,6 +195,82 @@ class SensorDashboardPlotTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
+
+    def test_peak_selection_disables_kvaser_sample_point(self) -> None:
+        with patch.object(SensorDashboard, "refresh_channels"):
+            dashboard = SensorDashboard()
+        peak_index = dashboard.adapter_combo.findData("peak")
+        kvaser_index = dashboard.adapter_combo.findData("kvaser")
+
+        dashboard.adapter_combo.setCurrentIndex(peak_index)
+        self.assertFalse(dashboard.host_sample_combo.isEnabled())
+        self.assertIn("PEAK", dashboard.host_sample_combo.toolTip())
+
+        dashboard.adapter_combo.setCurrentIndex(kvaser_index)
+        self.assertTrue(dashboard.host_sample_combo.isEnabled())
+        dashboard.deleteLater()
+
+    def test_peak_channel_refresh_uses_pcan_backend(self) -> None:
+        with patch.object(SensorDashboard, "refresh_channels"):
+            dashboard = SensorDashboard()
+        dashboard.adapter_combo.setCurrentIndex(
+            dashboard.adapter_combo.findData("peak")
+        )
+        peak_api = unittest.mock.Mock()
+        peak_api.list_channels.return_value = [
+            ChannelInfo(0x51, "PCAN_USBBUS1", "PEAK PCAN-USB, available")
+        ]
+        with patch.object(
+            dashboard_module, "can_api_for_adapter", return_value=peak_api
+        ) as factory:
+            dashboard.refresh_channels(show_error=False)
+
+        factory.assert_called_once_with("peak")
+        self.assertEqual(dashboard.channel_combo.currentData(), 0x51)
+        self.assertIn("PCAN_USBBUS1", dashboard.channel_combo.currentText())
+        dashboard.deleteLater()
+
+    def test_can_worker_opens_selected_peak_channel(self) -> None:
+        worker = CanWorker("peak", 0x51, 250_000, "87.5")
+
+        class FakeChannel:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback) -> None:
+                pass
+
+            def read(self, _timeout_ms: int):
+                worker.stop()
+                return None
+
+        class FakeApi:
+            def __init__(self) -> None:
+                self.opened = None
+
+            def list_channels(self):
+                return [ChannelInfo(0x51, "PCAN_USBBUS1", "available")]
+
+            def open_channel(self, channel: int, bitrate: int, sample_point: str):
+                self.opened = (channel, bitrate, sample_point)
+                return FakeChannel()
+
+        api = FakeApi()
+        connection_events = []
+        worker.connection_changed.connect(
+            lambda connected, name: connection_events.append((connected, name))
+        )
+        with patch.object(
+            dashboard_module, "can_api_for_adapter", return_value=api
+        ) as factory:
+            worker.run()
+
+        factory.assert_called_once_with("peak")
+        self.assertEqual(api.opened, (0x51, 250_000, "87.5"))
+        self.assertTrue(connection_events[0][0])
+        self.assertIn("PEAK PCAN-Basic", connection_events[0][1])
+        self.assertEqual(connection_events[-1], (False, ""))
+        worker.deleteLater()
 
     def test_min_max_decimation_preserves_extrema_and_bounds_output(self) -> None:
         points = [(float(index), 0.0) for index in range(5_000)]
