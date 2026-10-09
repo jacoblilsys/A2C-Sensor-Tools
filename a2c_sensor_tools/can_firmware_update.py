@@ -574,6 +574,35 @@ def _validate_standard_id(value: int, name: str, allow_zero: bool = True) -> Non
         raise FirmwareUpdateError(f"{name} must be a standard CAN ID from {minimum} to 0x7FF")
 
 
+def describe_version_relation(package_version: int, sensor_version: int) -> str:
+    if package_version == sensor_version:
+        return f"sensor already runs the selected firmware 0x{sensor_version:X}"
+    if package_version < sensor_version:
+        return (
+            f"sensor firmware 0x{sensor_version:X} is newer than selected package "
+            f"0x{package_version:X}"
+        )
+    return (
+        f"selected package 0x{package_version:X} is newer than sensor firmware "
+        f"0x{sensor_version:X}"
+    )
+
+
+def validate_update_version_policy(
+    package_version: int,
+    sensor_version: int,
+    *,
+    allow_same_or_older: bool,
+    dry_run: bool,
+) -> None:
+    if dry_run or allow_same_or_older or package_version > sensor_version:
+        return
+    raise FirmwareUpdateError(
+        f"package version 0x{package_version:X} is not newer than "
+        f"sensor version 0x{sensor_version:X}; use --allow-same-or-older only if intentional"
+    )
+
+
 def _print_inspection(path: Path, inspection: PackageInspection) -> None:
     print(f"Image: {path}")
     print(f"Size: {FLASH_SIZE} bytes ({PAGE_COUNT} pages)")
@@ -680,13 +709,17 @@ def command_update(args: argparse.Namespace) -> int:
             raise FirmwareUpdateError("connected sensor type does not match the package")
         if hardware != inspection.program.hardware:
             raise FirmwareUpdateError("connected sensor hardware does not match the package")
-        if inspection.program.version <= current_version and not args.allow_same_or_older:
-            raise FirmwareUpdateError(
-                f"package version 0x{inspection.program.version:X} is not newer than "
-                f"sensor version 0x{current_version:X}; use --allow-same-or-older only if intentional"
-            )
-
+        validate_update_version_policy(
+            inspection.program.version,
+            current_version,
+            allow_same_or_older=args.allow_same_or_older,
+            dry_run=args.dry_run,
+        )
         if args.dry_run:
+            print(
+                "Preflight version check: "
+                + describe_version_relation(inspection.program.version, current_version)
+            )
             print("Dry run complete; no bootloader command or erase was sent")
             return 0
 

@@ -55,15 +55,43 @@ try {
         --contents-directory "_internal" `
         --name "A2C-Sensor-Firmware-Updater" `
         --distpath $stageRoot `
-        --workpath (Join-Path $buildRoot "gui") `
+        --workpath (Join-Path $buildRoot "gui-updater") `
         --specpath $buildRoot `
         (Join-Path $repoRoot "packaging\firmware_updater_entry.py")
     if ($LASTEXITCODE -ne 0) {
-        throw "GUI packaging failed"
+        throw "Firmware updater GUI packaging failed"
     }
 
-    $appDirectory = Join-Path $stageRoot "A2C-Sensor-Firmware-Updater"
+    $updaterDirectory = Join-Path $stageRoot "A2C-Sensor-Firmware-Updater"
+    $appDirectory = Join-Path $stageRoot "A2C-Sensor-Tools"
+    Move-Item -LiteralPath $updaterDirectory -Destination $appDirectory
     $internalDirectory = Join-Path $appDirectory "_internal"
+
+    & $pythonExecutable -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --onedir `
+        --windowed `
+        --contents-directory "_internal" `
+        --name "A2C-IMU-Dashboard" `
+        --distpath $stageRoot `
+        --workpath (Join-Path $buildRoot "gui-dashboard") `
+        --specpath $buildRoot `
+        (Join-Path $repoRoot "packaging\dashboard_entry.py")
+    if ($LASTEXITCODE -ne 0) {
+        throw "IMU dashboard GUI packaging failed"
+    }
+
+    # Both applications are built with the same Python and PySide6 runtime.
+    # Merge the dashboard's Qt Charts additions into the updater's _internal
+    # directory so customers get two clearly named EXEs in one folder without
+    # duplicating the complete runtime.
+    $dashboardDirectory = Join-Path $stageRoot "A2C-IMU-Dashboard"
+    $dashboardExecutable = Join-Path $dashboardDirectory "A2C-IMU-Dashboard.exe"
+    $dashboardInternal = Join-Path $dashboardDirectory "_internal"
+    Copy-Item -LiteralPath $dashboardExecutable -Destination $appDirectory -Force
+    Copy-Item -Path (Join-Path $dashboardInternal "*") -Destination $internalDirectory -Recurse -Force
+
     & $pythonExecutable -m PyInstaller `
         --noconfirm `
         --clean `
@@ -114,7 +142,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Packaged command-line helper smoke test failed"
 }
 
-$archiveName = "A2C-Sensor-Tools-$version-Windows-x64-PEAK-test.zip"
+$archiveName = "A2C-Sensor-Tools-$version-Windows-x64.zip"
 $archivePath = Join-Path $distRoot $archiveName
 if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force

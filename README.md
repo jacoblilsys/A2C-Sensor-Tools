@@ -117,10 +117,11 @@ python -m pip install ".[build]"
 ```
 
 The script creates a versioned ZIP and SHA-256 file below `dist`. The ZIP
-contains the graphical updater, its command-line helper, Qt runtime files,
-customer instructions, and license notices. It does not include vendor CAN
-drivers or firmware. To add a supplied encrypted firmware image to a private
-customer package, pass `-FirmwarePackage path\to\firmware.binenc`.
+contains the graphical dashboard, graphical updater, updater command-line
+helper, shared Qt runtime files, customer instructions, and license notices.
+It does not include vendor CAN drivers or firmware. To add a supplied encrypted
+firmware image to a private customer package, pass
+`-FirmwarePackage path\to\firmware.binenc`.
 
 ## License
 

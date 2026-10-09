@@ -1,27 +1,38 @@
-A2C Sensor Firmware Updater - PEAK PCAN test build
-==================================================
+A2C Sensor Tools
+================
 
 This package is self-contained. Python, PySide6, and Qt do not need to be
 installed.
 
-Required PEAK software
-----------------------
-Install the current PEAK-System Windows driver and PCAN-Basic API before
-starting the updater:
+CAN adapter software
+--------------------
+For a PEAK PCAN-USB adapter, install the current PEAK-System Windows driver and
+PCAN-Basic API:
 
 https://www.peak-system.com/products/software/development-packages/pcan-basic/
 
 The PEAK installation supplies PCANBasic.dll and the hardware driver. They are
 not included in this A2C package.
 
+For a Kvaser adapter, install the current Kvaser Windows driver and CANlib SDK.
+The Kvaser installation supplies canlib32.dll. It is not included in this A2C
+package.
+
+Applications
+------------
+A2C-IMU-Dashboard.exe configures the sensor and displays live CAN data.
+
+A2C-Sensor-Firmware-Updater.exe checks and updates sensor firmware. Its Check
+Sensor function is read-only and does not erase or program the sensor.
+
 First test
 ----------
 1. Extract the complete ZIP file to a normal local folder. Do not run the
    application from inside the ZIP file.
-2. Connect the PEAK PCAN-USB adapter and only the A2C sensor being tested.
+2. Connect the CAN adapter and only the A2C sensor being tested.
 3. Start A2C-Sensor-Firmware-Updater.exe.
-4. Select "PEAK PCAN-Basic" and press Refresh.
-5. Select the PCAN_USBBUS channel and the sensor's current CAN bitrate.
+4. Select the installed CAN adapter type and press Refresh.
+5. Select the CAN channel and the sensor's current CAN bitrate.
 6. Select the encrypted A2C .binenc firmware package supplied separately.
 7. Press Check Sensor first. Do not start an update unless the detected sensor,
    hardware, and firmware information are correct.
@@ -43,9 +54,8 @@ Power-cycle the sensor and press Check Sensor before attempting another update.
 The updater temporarily disables periodic output only in RAM during an update;
 saved sensor settings are unchanged.
 
-This PEAK build is pending validation with physical PEAK hardware. The
-executables are not code-signed, so Windows may show a SmartScreen warning.
+The executables are not code-signed, so Windows may show a SmartScreen warning.
 
-Only A2C-Sensor-Firmware-Updater.exe is intended to be started by the user.
-Files in the _internal folder are application components and should not be
-opened or moved individually.
+Only A2C-IMU-Dashboard.exe and A2C-Sensor-Firmware-Updater.exe are intended to
+be started by the user. Files in the _internal folder are application
+components and should not be opened or moved individually.

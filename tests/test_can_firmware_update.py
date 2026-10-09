@@ -18,9 +18,11 @@ from a2c_sensor_tools.can_firmware_update import (
     TrafficLoggingChannel,
     build_parser,
     default_can_log_path,
+    describe_version_relation,
     inspect_package,
     main,
     stm32_crc,
+    validate_update_version_policy,
 )
 from a2c_sensor_tools.can_sensor_monitor import CanFrame
 from a2c_sensor_tools.pcan_basic import PcanError
@@ -61,6 +63,41 @@ class CommandLineTests(unittest.TestCase):
         )
         self.assertEqual(args.adapter, "peak")
         self.assertEqual(args.channel, 0x51)
+
+    def test_version_relation_describes_equal_newer_and_older_sensors(self) -> None:
+        self.assertEqual(
+            describe_version_relation(0x132, 0x132),
+            "sensor already runs the selected firmware 0x132",
+        )
+        self.assertIn(
+            "sensor firmware 0x133 is newer",
+            describe_version_relation(0x132, 0x133),
+        )
+        self.assertIn(
+            "selected package 0x132 is newer",
+            describe_version_relation(0x132, 0x131),
+        )
+
+    def test_same_version_is_allowed_for_preflight_but_blocked_for_update(self) -> None:
+        validate_update_version_policy(
+            0x132,
+            0x132,
+            allow_same_or_older=False,
+            dry_run=True,
+        )
+        with self.assertRaisesRegex(FirmwareUpdateError, "not newer"):
+            validate_update_version_policy(
+                0x132,
+                0x132,
+                allow_same_or_older=False,
+                dry_run=False,
+            )
+        validate_update_version_policy(
+            0x132,
+            0x132,
+            allow_same_or_older=True,
+            dry_run=False,
+        )
 
 
 class Stm32CrcTests(unittest.TestCase):

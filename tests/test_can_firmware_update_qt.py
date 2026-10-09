@@ -131,6 +131,21 @@ class FirmwareUpdaterQtTests(unittest.TestCase):
         critical.assert_not_called()
         window.close()
 
+    def test_failure_dialog_shows_cli_error_instead_of_only_exit_code(self) -> None:
+        with patch.object(FirmwareUpdaterWindow, "refresh_channels"):
+            window = FirmwareUpdaterWindow()
+        window._handle_process_line(
+            "ERROR: package version 0x132 is not newer than sensor version 0x132"
+        )
+        with patch.object(QMessageBox, "critical") as critical:
+            window._process_finished(1, QProcess.ExitStatus.NormalExit)
+
+        critical.assert_called_once()
+        message = critical.call_args.args[2]
+        self.assertIn("package version 0x132", message)
+        self.assertNotEqual(message, "Updater stopped with exit code 1")
+        window.close()
+
     def test_progress_parser_handles_carriage_return_chunks(self) -> None:
         parser = UpdateOutputParser()
         self.assertEqual(parser.feed("Starting\nProgramming   1/800"), ["Starting"])

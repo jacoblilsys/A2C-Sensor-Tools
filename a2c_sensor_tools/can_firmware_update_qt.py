@@ -232,6 +232,7 @@ class FirmwareUpdaterWindow(QMainWindow):
         self._dry_run = False
         self._next_progress_log_percent = 0
         self._can_log_path: Optional[Path] = None
+        self._last_process_error: Optional[str] = None
         self._channel_by_adapter: dict[str, int] = {}
 
         self._release_checker = install_help_menu(self, APP_TITLE)
@@ -609,6 +610,7 @@ class FirmwareUpdaterWindow(QMainWindow):
         profile = self._inspection.profile
         self._save_settings()
         self._dry_run = dry_run
+        self._last_process_error = None
         self._can_log_path = config.can_log
         self.open_can_log_button.setEnabled(False)
         self._output_parser = UpdateOutputParser()
@@ -669,6 +671,8 @@ class FirmwareUpdaterWindow(QMainWindow):
             self._handle_process_line(line)
 
     def _handle_process_line(self, line: str) -> None:
+        if line.startswith("ERROR:"):
+            self._last_process_error = line.removeprefix("ERROR:").strip()
         match = PROGRESS_PATTERN.search(line)
         if match:
             current = int(match.group(1))
@@ -723,9 +727,14 @@ class FirmwareUpdaterWindow(QMainWindow):
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
             self.progress_bar.setFormat("Failed — see log")
-            message = f"Updater stopped with exit code {exit_code}"
-            self._append_log(message)
-            self.statusBar().showMessage(message)
+            exit_message = f"Updater stopped with exit code {exit_code}"
+            self._append_log(exit_message)
+            if self._last_process_error:
+                message = f"The operation could not continue:\n\n{self._last_process_error}"
+                self.statusBar().showMessage(self._last_process_error)
+            else:
+                message = exit_message
+                self.statusBar().showMessage(exit_message)
             QMessageBox.critical(self, APP_TITLE, message)
 
     def _process_error(self, error: QProcess.ProcessError) -> None:
