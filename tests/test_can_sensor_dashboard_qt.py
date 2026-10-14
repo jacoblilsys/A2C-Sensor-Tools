@@ -11,9 +11,11 @@ try:
         CMD_CALIBRATE_USING_GRAVITY,
         CMD_GET_CALIBRATION_INFORMATION,
         CMD_GET_GYRO_CALIBRATION,
+        CMD_GET_IMU_SETTINGS,
         CMD_SAVE_CALIBRATION,
         CMD_SET_FILTER_ID,
         CMD_SET_AVERAGING,
+        CMD_SET_FSR,
         CMD_SET_BANDWIDTH,
         CMD_SET_GYRO_CALIBRATION,
         CMD_SET_VIBRATION_CONFIGURATION,
@@ -24,6 +26,9 @@ try:
         CombinedAxisMeasurement,
         FILTER_STD_1_2,
         GYRO_CALIBRATION_TIMEOUT_MS,
+        HARDWARE_RECONFIGURE_DELAY_MS,
+        MULTIFRAME_READBACK_DELAY_MS,
+        SIMPLE_COMMAND_DELAY_MS,
         PLOT_BUFFER_CAPACITY,
         PLOT_RENDER_POINT_LIMIT,
         PendingBaudChange,
@@ -440,8 +445,10 @@ class SensorDashboardPlotTests(unittest.TestCase):
     def test_imu_controls_and_apply_payloads_follow_selected_mode(self) -> None:
         with patch.object(SensorDashboard, "refresh_channels"):
             dashboard = SensorDashboard()
-        captured: list[bytes] = []
-        dashboard._schedule_payloads = lambda payloads, spacing_ms=15: captured.extend(payloads)
+        captured: list[tuple[bytes, int]] = []
+        dashboard._schedule_payload_steps = (
+            lambda steps, replace=False: captured.extend(steps)
+        )
 
         dashboard._set_combo_data(dashboard.mode_combo, 1)
         self.assertTrue(dashboard.accel_bw_combo.isEnabled())
@@ -449,7 +456,7 @@ class SensorDashboardPlotTests(unittest.TestCase):
         self.assertFalse(dashboard.highpass_checkbox.isEnabled())
         self.assertFalse(dashboard.rms_average_spin.isEnabled())
         dashboard.apply_imu_settings()
-        normal_commands = [payload[0] for payload in captured]
+        normal_commands = [payload[0] for payload, _delay in captured]
         self.assertIn(CMD_SET_BANDWIDTH, normal_commands)
         self.assertIn(CMD_SET_AVERAGING, normal_commands)
         self.assertNotIn(CMD_SET_VIBRATION_CONFIGURATION, normal_commands)
@@ -464,7 +471,7 @@ class SensorDashboardPlotTests(unittest.TestCase):
         self.assertEqual(dashboard.frequency_response_output_combo.currentData(), "vibration_rms")
         self.assertGreater(len(dashboard.frequency_response_chart._series), 0)
         dashboard.apply_imu_settings()
-        vibration_commands = [payload[0] for payload in captured]
+        vibration_commands = [payload[0] for payload, _delay in captured]
         self.assertIn(CMD_SET_VIBRATION_CONFIGURATION, vibration_commands)
         self.assertNotIn(CMD_SET_BANDWIDTH, vibration_commands)
         self.assertNotIn(CMD_SET_AVERAGING, vibration_commands)
@@ -475,10 +482,90 @@ class SensorDashboardPlotTests(unittest.TestCase):
             dashboard._render_timer,
             dashboard._label_timer,
             dashboard._log_timer,
+            dashboard._tx_sequence_timer,
         ):
             timer.stop()
         dashboard.deleteLater()
 
+    def test_average_only_apply_is_fast_and_minimal(self) -> None:
+        with patch.object(SensorDashboard, "refresh_channels"):
+            dashboard = SensorDashboard()
+        captured: list[tuple[bytes, int]] = []
+        dashboard._schedule_payload_steps = (
+            lambda steps, replace=False: captured.extend(steps)
+        )
+
+        dashboard._set_combo_data(dashboard.mode_combo, 1)
+        dashboard._current_mode = 1
+        dashboard._current_accel_fsr = int(dashboard.accel_fsr_combo.currentData())
+        dashboard._current_gyro_fsr = int(dashboard.gyro_fsr_combo.currentData())
+        dashboard._current_accel_bw = int(dashboard.accel_bw_combo.currentData())
+        dashboard._current_gyro_bw = int(dashboard.gyro_bw_combo.currentData())
+        dashboard._current_standard_average = 1
+        dashboard._current_rms_average = dashboard.rms_average_spin.value()
+        dashboard.standard_average_spin.setValue(7)
+
+        dashboard.apply_imu_settings()
+
+        self.assertEqual(
+            [payload[0] for payload, _delay in captured],
+            [CMD_SET_AVERAGING, CMD_GET_IMU_SETTINGS],
+        )
+        self.assertEqual(
+            [delay for _payload, delay in captured],
+            [SIMPLE_COMMAND_DELAY_MS, MULTIFRAME_READBACK_DELAY_MS],
+        )
+        self.assertEqual(captured[0][0][2], 7)
+
+        captured.clear()
+        previous_fsr = dashboard._current_accel_fsr
+        next_index = (dashboard.accel_fsr_combo.currentIndex() + 1) % dashboard.accel_fsr_combo.count()
+        dashboard.accel_fsr_combo.setCurrentIndex(next_index)
+        dashboard._current_standard_average = 7
+        dashboard.apply_imu_settings()
+        self.assertNotEqual(previous_fsr, int(dashboard.accel_fsr_combo.currentData()))
+        self.assertEqual(
+            [payload[0] for payload, _delay in captured],
+            [CMD_SET_FSR, CMD_GET_IMU_SETTINGS],
+        )
+        self.assertEqual(captured[0][1], HARDWARE_RECONFIGURE_DELAY_MS)
+
+        for timer in (
+            dashboard._poll_timer,
+            dashboard._rate_timer,
+            dashboard._render_timer,
+            dashboard._label_timer,
+            dashboard._log_timer,
+            dashboard._tx_sequence_timer,
+        ):
+            timer.stop()
+        dashboard.deleteLater()
+
+    def test_payload_sequence_preserves_order(self) -> None:
+        with patch.object(SensorDashboard, "refresh_channels"):
+            dashboard = SensorDashboard()
+        sent: list[bytes] = []
+        dashboard._send = sent.append
+        dashboard._schedule_payload_steps(
+            [(b"first", 1), (b"second", 1), (b"third", 1)],
+            replace=True,
+        )
+        dashboard._tx_sequence_timer.stop()
+        for _index in range(3):
+            dashboard._send_next_scheduled_payload()
+            dashboard._tx_sequence_timer.stop()
+        self.assertEqual(sent, [b"first", b"second", b"third"])
+
+        for timer in (
+            dashboard._poll_timer,
+            dashboard._rate_timer,
+            dashboard._render_timer,
+            dashboard._label_timer,
+            dashboard._log_timer,
+            dashboard._tx_sequence_timer,
+        ):
+            timer.stop()
+        dashboard.deleteLater()
     def test_gyro_bias_controls_and_readback_follow_selected_policy(self) -> None:
         with patch.object(SensorDashboard, "refresh_channels"):
             dashboard = SensorDashboard()

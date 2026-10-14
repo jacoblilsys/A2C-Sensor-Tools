@@ -163,6 +163,10 @@ VIBRATION_STREAM_RATE_2KHZ = 2
 VIBRATION_STREAM_RATE_4KHZ = 4
 CAN_WORKER_BATCH_SIZE = 64
 CAN_WORKER_BATCH_INTERVAL_S = 0.010
+SIMPLE_COMMAND_DELAY_MS = 25
+MULTIFRAME_READBACK_DELAY_MS = 100
+HARDWARE_RECONFIGURE_DELAY_MS = 250
+MODE_TRANSITION_DELAY_MS = 500
 
 FILTER_STD_1_2 = 0x01
 FILTER_STD_3_4 = 0x02
@@ -1143,6 +1147,13 @@ class SensorDashboard(QMainWindow):
         self._last_rate_count = 0
         self._current_mode: Optional[int] = None
         self._current_sensor_response: Optional[tuple[int, bool]] = None
+        self._current_accel_fsr: Optional[int] = None
+        self._current_gyro_fsr: Optional[int] = None
+        self._current_accel_bw: Optional[int] = None
+        self._current_gyro_bw: Optional[int] = None
+        self._current_standard_average: Optional[int] = None
+        self._current_rms_average: Optional[int] = None
+        self._current_vibration_configuration: Optional[tuple[int, int, int, int]] = None
         self._firmware_version: Optional[int] = None
         self._gyro_policy_supported: Optional[bool] = None
         self._pending_baud_change: Optional[PendingBaudChange] = None
@@ -1191,6 +1202,7 @@ class SensorDashboard(QMainWindow):
         self._gyro_calibration_response: Optional[tuple[int, bool]] = None
         self._gyro_calibration_request: Optional[tuple[int, bool]] = None
         self._gyro_runtime_diagnostics: dict[int, dict[str, object]] = {}
+        self._tx_sequence_queue: deque[tuple[bytes, int]] = deque()
         self._combined_latest = {
             "acceleration": [math.nan, math.nan, math.nan],
             "linear_acceleration": [math.nan, math.nan, math.nan],
@@ -1200,6 +1212,8 @@ class SensorDashboard(QMainWindow):
 
         self._release_checker = install_help_menu(self, APP_TITLE)
         self._build_ui()
+        self._tx_sequence_timer = QTimer(self)
+        self._tx_sequence_timer.timeout.connect(self._send_next_scheduled_payload)
         self._restore_settings()
         self.request_id_edit.textChanged.connect(self._request_target_changed)
         self.request_extended_checkbox.toggled.connect(
@@ -2100,6 +2114,7 @@ class SensorDashboard(QMainWindow):
         self._worker.start()
 
     def disconnect_can(self) -> None:
+        self._cancel_scheduled_payloads()
         if self._worker is not None:
             self._worker.stop()
             self._worker.wait(2000)
@@ -2117,6 +2132,7 @@ class SensorDashboard(QMainWindow):
                 )
             self._current_mode = None
             self._current_sensor_response = None
+            self._clear_imu_settings_readback()
             self._decoder.sensor_can_id = None
             self._decoder.system_mode = None
             self._firmware_version = None
@@ -2204,11 +2220,21 @@ class SensorDashboard(QMainWindow):
         extended = self.request_extended_checkbox.isChecked()
         return parse_can_id(self.request_id_edit.text(), extended=extended), extended
 
+    def _clear_imu_settings_readback(self) -> None:
+        self._current_accel_fsr = None
+        self._current_gyro_fsr = None
+        self._current_accel_bw = None
+        self._current_gyro_bw = None
+        self._current_standard_average = None
+        self._current_rms_average = None
+        self._current_vibration_configuration = None
+
     def _request_target_changed(self, _value=None) -> None:
         if self._gyro_calibration_in_progress:
             return
         self._current_mode = None
         self._current_sensor_response = None
+        self._clear_imu_settings_readback()
         self._firmware_version = None
         self._gyro_policy_supported = None
         self._decoder.sensor_can_id = None
@@ -2252,9 +2278,39 @@ class SensorDashboard(QMainWindow):
             can_id, extended = calibration_target
         self._worker.enqueue(can_id, data, extended)
 
+    def _cancel_scheduled_payloads(self) -> None:
+        self._tx_sequence_timer.stop()
+        self._tx_sequence_queue.clear()
+
+    def _send_next_scheduled_payload(self) -> None:
+        if not self._tx_sequence_queue:
+            self._tx_sequence_timer.stop()
+            return
+        payload, delay_after_ms = self._tx_sequence_queue.popleft()
+        self._send(payload)
+        if self._tx_sequence_queue:
+            self._tx_sequence_timer.start(max(1, delay_after_ms))
+        else:
+            self._tx_sequence_timer.stop()
+
+    def _schedule_payload_steps(
+        self, steps: list[tuple[bytes, int]], *, replace: bool = False
+    ) -> None:
+        if replace:
+            self._cancel_scheduled_payloads()
+        if not steps:
+            return
+        was_idle = (
+            not self._tx_sequence_queue and not self._tx_sequence_timer.isActive()
+        )
+        self._tx_sequence_queue.extend(steps)
+        if was_idle:
+            self._tx_sequence_timer.start(0)
+
     def _schedule_payloads(self, payloads: list[bytes], spacing_ms: int = 15) -> None:
-        for index, payload in enumerate(payloads):
-            QTimer.singleShot(index * spacing_ms, lambda value=payload: self._send(value))
+        self._schedule_payload_steps(
+            [(payload, spacing_ms) for payload in payloads]
+        )
 
     def refresh_all_settings(self) -> None:
         if not self._connected:
@@ -2588,6 +2644,7 @@ class SensorDashboard(QMainWindow):
             mode = data[2] if len(data) >= 4 and data[1] == 0 else data[1]
             response_identity = (frame.can_id, frame.is_extended)
             if self._current_sensor_response != response_identity:
+                self._clear_imu_settings_readback()
                 self._firmware_version = None
                 self._gyro_policy_supported = None
                 self._clear_gyro_runtime_diagnostics(
@@ -2599,24 +2656,36 @@ class SensorDashboard(QMainWindow):
             self._imu_mode_controls_changed()
         elif command == CMD_SET_FSR and len(data) >= 3:
             if data[1] == 1:
+                self._current_accel_fsr = data[2]
                 self._set_combo_data(self.accel_fsr_combo, data[2])
             elif data[1] == 2:
+                self._current_gyro_fsr = data[2]
                 self._set_combo_data(self.gyro_fsr_combo, data[2])
         elif command == CMD_SET_BANDWIDTH and len(data) >= 3:
             if data[1] == 1:
+                self._current_accel_bw = data[2]
                 self._set_combo_data(self.accel_bw_combo, data[2])
             elif data[1] == 2:
+                self._current_gyro_bw = data[2]
                 self._set_combo_data(self.gyro_bw_combo, data[2])
         elif command == CMD_SET_AVERAGING and len(data) >= 4:
+            self._current_standard_average = data[2]
+            self._current_rms_average = data[3]
             self.standard_average_spin.setValue(data[2])
             self.rms_average_spin.setValue(data[3])
         elif command == CMD_GET_VIBRATION_CONFIGURATION and len(data) >= 8:
-            self.lowpass_hz_spin.setValue(int.from_bytes(data[4:6], "big"))
+            highpass_hz = int.from_bytes(data[2:4], "big")
+            lowpass_hz = int.from_bytes(data[4:6], "big")
+            window_ms = int.from_bytes(data[6:8], "big")
+            self._current_vibration_configuration = (
+                data[1], highpass_hz, lowpass_hz, window_ms
+            )
+            self.lowpass_hz_spin.setValue(lowpass_hz)
             self.lowpass_checkbox.setChecked(bool(data[1] & 0x01))
             self._update_highpass_limit()
-            self.highpass_hz_spin.setValue(int.from_bytes(data[2:4], "big"))
+            self.highpass_hz_spin.setValue(highpass_hz)
             self.highpass_checkbox.setChecked(bool(data[1] & 0x02))
-            self.vibration_window_spin.setValue(int.from_bytes(data[6:8], "big"))
+            self.vibration_window_spin.setValue(window_ms)
         elif command == CMD_GET_SAMPLING_TIME and len(data) >= 8:
             rate = int.from_bytes(data[2:6], "big") / 1000.0
             window = int.from_bytes(data[6:8], "big")
@@ -3603,81 +3672,138 @@ class SensorDashboard(QMainWindow):
         self.frequency_response_summary_label.setText(summary)
 
     def apply_imu_settings(self) -> None:
+        for spinbox in (
+            self.standard_average_spin,
+            self.rms_average_spin,
+            self.highpass_hz_spin,
+            self.lowpass_hz_spin,
+            self.vibration_window_spin,
+        ):
+            spinbox.interpretText()
+
         mode = int(self.mode_combo.currentData())
-        payloads: list[bytes] = []
+        steps: list[tuple[bytes, int]] = []
+        changed_settings = 0
+
+        if mode != self._current_mode:
+            old_vibration = (
+                self._current_mode is not None and 2 <= self._current_mode <= 6
+            )
+            new_vibration = 2 <= mode <= 6
+            delay_ms = (
+                MODE_TRANSITION_DELAY_MS
+                if self._current_mode is None or old_vibration != new_vibration
+                else SIMPLE_COMMAND_DELAY_MS
+            )
+            steps.append((request_payload(CMD_SET_SYSTEM_MODE, mode), delay_ms))
+            changed_settings += 1
+
         if mode != 0:
-            payloads.append(
-                padded_payload(
-                    CMD_SET_FSR, 1, bytes((int(self.accel_fsr_combo.currentData()),))
+            accel_fsr = int(self.accel_fsr_combo.currentData())
+            if accel_fsr != self._current_accel_fsr:
+                steps.append(
+                    (
+                        padded_payload(CMD_SET_FSR, 1, bytes((accel_fsr,))),
+                        HARDWARE_RECONFIGURE_DELAY_MS,
+                    )
                 )
-            )
+                changed_settings += 1
+
         if mode == 1:
+            gyro_fsr = int(self.gyro_fsr_combo.currentData())
             accel_bw = int(self.accel_bw_combo.currentData())
-            payloads.append(
-                padded_payload(CMD_SET_FSR, 2, bytes((int(self.gyro_fsr_combo.currentData()),)))
-            )
-            # Index zero is a legacy 218 Hz readback value that the setter does not accept.
-            if accel_bw != 0:
-                payloads.append(padded_payload(CMD_SET_BANDWIDTH, 1, bytes((accel_bw,))))
-            payloads.extend(
-                (
-                    padded_payload(
-                        CMD_SET_BANDWIDTH,
-                        2,
-                        bytes((int(self.gyro_bw_combo.currentData()),)),
-                    ),
-                    padded_payload(
-                        CMD_SET_AVERAGING,
-                        0,
-                        bytes(
-                            (
-                                self.standard_average_spin.value(),
-                                self.rms_average_spin.value(),
-                            )
-                        ),
-                    ),
+            gyro_bw = int(self.gyro_bw_combo.currentData())
+            standard_average = self.standard_average_spin.value()
+            rms_average = self.rms_average_spin.value()
+
+            if gyro_fsr != self._current_gyro_fsr:
+                steps.append(
+                    (
+                        padded_payload(CMD_SET_FSR, 2, bytes((gyro_fsr,))),
+                        HARDWARE_RECONFIGURE_DELAY_MS,
+                    )
                 )
-            )
+                changed_settings += 1
+            # Index zero is a legacy 218 Hz readback value that the setter does not accept.
+            if accel_bw != 0 and accel_bw != self._current_accel_bw:
+                steps.append(
+                    (
+                        padded_payload(CMD_SET_BANDWIDTH, 1, bytes((accel_bw,))),
+                        HARDWARE_RECONFIGURE_DELAY_MS,
+                    )
+                )
+                changed_settings += 1
+            if gyro_bw != self._current_gyro_bw:
+                steps.append(
+                    (
+                        padded_payload(CMD_SET_BANDWIDTH, 2, bytes((gyro_bw,))),
+                        HARDWARE_RECONFIGURE_DELAY_MS,
+                    )
+                )
+                changed_settings += 1
+            if (
+                standard_average != self._current_standard_average
+                or rms_average != self._current_rms_average
+            ):
+                steps.append(
+                    (
+                        padded_payload(
+                            CMD_SET_AVERAGING,
+                            0,
+                            bytes((standard_average, rms_average)),
+                        ),
+                        SIMPLE_COMMAND_DELAY_MS,
+                    )
+                )
+                changed_settings += 1
         elif 2 <= mode <= 6:
             flags = int(self.lowpass_checkbox.isChecked()) | (
                 int(self.highpass_checkbox.isChecked()) << 1
             )
-            payloads.append(
-                bytes(
+            highpass_hz = self.highpass_hz_spin.value()
+            lowpass_hz = self.lowpass_hz_spin.value()
+            window_ms = self.vibration_window_spin.value()
+            vibration_configuration = (
+                flags, highpass_hz, lowpass_hz, window_ms
+            )
+            if vibration_configuration != self._current_vibration_configuration:
+                steps.append(
                     (
-                        CMD_SET_VIBRATION_CONFIGURATION,
-                        flags,
-                        (self.highpass_hz_spin.value() >> 8) & 0xFF,
-                        self.highpass_hz_spin.value() & 0xFF,
-                        (self.lowpass_hz_spin.value() >> 8) & 0xFF,
-                        self.lowpass_hz_spin.value() & 0xFF,
-                        (self.vibration_window_spin.value() >> 8) & 0xFF,
-                        self.vibration_window_spin.value() & 0xFF,
+                        bytes(
+                            (
+                                CMD_SET_VIBRATION_CONFIGURATION,
+                                flags,
+                                (highpass_hz >> 8) & 0xFF,
+                                highpass_hz & 0xFF,
+                                (lowpass_hz >> 8) & 0xFF,
+                                lowpass_hz & 0xFF,
+                                (window_ms >> 8) & 0xFF,
+                                window_ms & 0xFF,
+                            )
+                        ),
+                        SIMPLE_COMMAND_DELAY_MS,
                     )
                 )
-            )
-        payloads.append(request_payload(CMD_SET_SYSTEM_MODE, mode))
-        self._schedule_payloads(payloads, spacing_ms=20)
-        self.statusBar().showMessage("Applied volatile IMU settings; waiting for mode transition")
-        QTimer.singleShot(500, self._refresh_imu_settings)
+                changed_settings += 1
 
-    def _refresh_imu_settings(self) -> None:
-        self._clear_gyro_runtime_diagnostics(
-            "Reading a fresh runtime gate diagnostic snapshot..."
+        # This single request returns FSR, bandwidth, averaging, mode, and
+        # vibration configuration frames. It is both faster and less likely to
+        # overflow the sensor queues than the previous post-apply refresh burst.
+        steps.append(
+            (
+                request_payload(CMD_GET_IMU_SETTINGS),
+                MULTIFRAME_READBACK_DELAY_MS,
+            )
         )
-        payloads = [
-            request_payload(CMD_GET_IMU_SETTINGS),
-            request_payload(CMD_GET_SYSTEM_MODE),
-            request_payload(CMD_GET_VIBRATION_CONFIGURATION),
-            request_payload(CMD_GET_SAMPLING_TIME),
-            request_payload(CMD_GET_GYRO_CALIBRATION),
-            request_payload(CMD_GET_VIBRATION_STREAM, 0),
-        ]
-        payloads.extend(
-            request_payload(CMD_GET_CALIBRATION_INFORMATION, subcommand)
-            for subcommand in GYRO_RUNTIME_DIAGNOSTIC_SUBCOMMANDS
-        )
-        self._schedule_payloads(payloads)
+        self._schedule_payload_steps(steps, replace=True)
+        if changed_settings:
+            self.statusBar().showMessage(
+                f"Applying {changed_settings} changed IMU setting(s), then verifying readback..."
+            )
+        else:
+            self.statusBar().showMessage(
+                "No changed IMU settings; refreshing readback..."
+            )
 
     def _gyro_calibration_configuration(self) -> GyroCalibrationConfiguration:
         return GyroCalibrationConfiguration(
