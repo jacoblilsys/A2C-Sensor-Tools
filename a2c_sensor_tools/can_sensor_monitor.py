@@ -106,6 +106,13 @@ GYRO_RUNTIME_DIAGNOSTIC_NAMES = {
     0x11: "gyro metrics",
 }
 
+FUSION_RUNTIME_DIAGNOSTIC_NAMES = {
+    0x12: "runtime summary",
+    0x13: "rejection metrics",
+    0x14: "runtime counters",
+}
+FUSION_ENGINE_NAMES = {0: "InvenSense", 1: "x-io Fusion"}
+
 ACCEL_FSR_BY_INDEX = {
     0: 2,
     1: 4,
@@ -479,10 +486,10 @@ class SensorDecoder:
         data = frame.data
         command = data[0]
 
-        if command == CMD_SEND_ACCELERATION and len(data) >= 8 and data[1] == 0:
+        if command == CMD_SEND_ACCELERATION and len(data) >= 8 and data[1] in (0, 1):
             self._remember_base_id(frame)
             counts = struct.unpack(">hhh", data[2:8])
-            return self._format_xyz("AVERAGE", counts)
+            return self._format_xyz("LINEAR" if data[1] == 1 else "AVERAGE", counts)
 
         if command == CMD_SEND_INCLINATION and len(data) >= 8 and data[1] <= 2:
             counts = struct.unpack(">hhh", data[2:8])
@@ -613,6 +620,33 @@ class SensorDecoder:
                 f"GYRO GATE gyro norm={int(values['gyro_norm_mdps']) / 1000.0:.3f} dps, "
                 f"noise={int(values['gyro_noise_mdps']) / 1000.0:.3f} dps, "
                 f"temperature span={int(values['temperature_span_centi_c']) / 100.0:.2f} C"
+            )
+
+        if (
+            command == CMD_GET_CALIBRATION_INFORMATION
+            and len(data) == 8
+            and data[1] in FUSION_RUNTIME_DIAGNOSTIC_NAMES
+        ):
+            self._remember_base_id(frame)
+            if data[1] == 0x12:
+                selected = FUSION_ENGINE_NAMES.get(data[3], f"unknown {data[3]}")
+                output = FUSION_ENGINE_NAMES.get(data[4], f"unknown {data[4]}")
+                flags = data[7]
+                return (
+                    f"FUSION v{data[2]}, selected={selected}, output={output}, "
+                    f"ready={bool(data[5])}, startup={bool(data[6])}, "
+                    f"accel ignored={bool(flags & 0x01)}, recovery={bool(flags & 0x02)}, "
+                    f"flags=0x{flags:02X}"
+                )
+            first, second, third = struct.unpack(">HHH", data[2:8])
+            if data[1] == 0x13:
+                return (
+                    f"FUSION acceleration error={first / 1000.0:.3f} deg, "
+                    f"recovery trigger={second / 10.0:.1f}%, startup resets={third}"
+                )
+            return (
+                f"FUSION fallback samples={first}, ignored acceleration samples={second}, "
+                f"startup samples={third}"
             )
 
         if command == CMD_GET_GYRO_CALIBRATION and len(data) >= 8:
@@ -763,7 +797,8 @@ def message_stream(frame: CanFrame) -> tuple[StreamKey, str]:
     label = f"UNKNOWN (0x{command:02X})"
 
     if command == CMD_SEND_ACCELERATION:
-        label = "AVERAGE (0x0A)"
+        subtype = frame.data[1] if dlc >= 2 else -1
+        label = "LINEAR (0x0A)" if subtype == 1 else "AVERAGE (0x0A)"
     elif command == CMD_SEND_INCLINATION:
         label = "ANGLES (0x0B)"
     elif command == CMD_SEND_RMS:
@@ -781,10 +816,14 @@ def message_stream(frame: CanFrame) -> tuple[StreamKey, str]:
         label = "GYRO CAL CONFIG (0xC8)"
     elif command == CMD_GET_CALIBRATION_INFORMATION:
         subtype = frame.data[1] if dlc >= 2 else -1
-        name = GYRO_RUNTIME_DIAGNOSTIC_NAMES.get(
+        name = FUSION_RUNTIME_DIAGNOSTIC_NAMES.get(subtype) or GYRO_RUNTIME_DIAGNOSTIC_NAMES.get(
             subtype, f"ITEM 0x{subtype:02X}"
         )
-        prefix = "GYRO CAL" if subtype in GYRO_RUNTIME_DIAGNOSTIC_NAMES else "CALIBRATION"
+        prefix = (
+            "FUSION" if subtype in FUSION_RUNTIME_DIAGNOSTIC_NAMES
+            else "GYRO CAL" if subtype in GYRO_RUNTIME_DIAGNOSTIC_NAMES
+            else "CALIBRATION"
+        )
         label = f"{prefix} {name.upper()} (0x18)"
     elif command == CMD_GET_SAMPLING_TIME:
         label = "SAMPLE RATE (0xE4)"

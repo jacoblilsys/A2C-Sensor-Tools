@@ -15,6 +15,61 @@ from a2c_sensor_tools.can_sensor_monitor import (
 
 
 class SensorDecoderTests(unittest.TestCase):
+    def test_fusion_linear_acceleration_is_signed_and_has_its_own_stream(self):
+        frame = CanFrame(0x125, bytes.fromhex("0A 01 03 E8 FC 18 00 7D"))
+        decoded = SensorDecoder().decode(frame)
+        self.assertIn("LINEAR", decoded)
+        self.assertIn("+1.0000 g", decoded)
+        self.assertIn("-1.0000 g", decoded)
+        self.assertIn("+0.1250 g", decoded)
+        key, label = message_stream(frame)
+        acceleration_key, _ = message_stream(
+            CanFrame(0x125, bytes.fromhex("0A 00 03 E8 FC 18 00 7D"))
+        )
+        self.assertNotEqual(key, acceleration_key)
+        self.assertEqual(label, "LINEAR (0x0A)")
+
+    def test_fusion_debug_replies_use_firmware_units_and_independent_streams(self):
+        cases = (
+            ("18 12 01 01 00 00 01 03", (
+                "selected=x-io Fusion", "output=InvenSense", "ready=False",
+                "startup=True", "accel ignored=True", "recovery=True",
+            )),
+            ("18 12 01 01 01 01 00 00", (
+                "output=x-io Fusion", "ready=True", "startup=False",
+                "accel ignored=False", "recovery=False",
+            )),
+            ("18 13 13 88 01 F4 00 02", (
+                "acceleration error=5.000 deg", "recovery trigger=50.0%", "startup resets=2",
+            )),
+            ("18 14 FF FF 00 03 0B B8", (
+                "fallback samples=65535", "ignored acceleration samples=3", "startup samples=3000",
+            )),
+        )
+        keys = set()
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                frame = CanFrame(0x125, bytes.fromhex(payload))
+                decoded = SensorDecoder().decode(frame)
+                for text in expected:
+                    self.assertIn(text, decoded)
+                key, label = message_stream(frame)
+                keys.add(key)
+                self.assertTrue(label.startswith("FUSION "))
+        self.assertEqual(len(keys), 3)
+
+    def test_fusion_debug_preserves_unknown_engine_and_flag_values(self):
+        decoded = SensorDecoder().decode(
+            CanFrame(0x125, bytes.fromhex("18 12 02 02 03 00 00 80"))
+        )
+        self.assertIn("selected=unknown 2", decoded)
+        self.assertIn("output=unknown 3", decoded)
+        self.assertIn("flags=0x80", decoded)
+        for payload in ("18 12 01", "18 13 00 01 00 02 00", "18 15 00 00 00 00 00 00"):
+            with self.subTest(payload=payload):
+                self.assertIsNone(SensorDecoder().decode(CanFrame(0x125, bytes.fromhex(payload))))
+
+
     def test_average_is_signed_big_endian_and_scaled(self):
         decoder = SensorDecoder(accel_fsr_g=16)
         frame = CanFrame(

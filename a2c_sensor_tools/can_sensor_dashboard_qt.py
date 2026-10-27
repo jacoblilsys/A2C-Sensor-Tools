@@ -69,6 +69,8 @@ try:
         GYRO_BIAS_MODE_NAMES,
         GYRO_GATE_STATE_NAMES,
         GYRO_RUNTIME_DIAGNOSTIC_SUBCOMMANDS,
+        FUSION_ENGINE_NAMES,
+        FUSION_RUNTIME_DIAGNOSTIC_NAMES,
         MODE_NAMES,
         RMS_VECTOR_NAME_BY_ID_OFFSET,
         CanFrame,
@@ -103,6 +105,8 @@ except ImportError:  # Direct execution from the Tools directory.
         GYRO_BIAS_MODE_NAMES,
         GYRO_GATE_STATE_NAMES,
         GYRO_RUNTIME_DIAGNOSTIC_SUBCOMMANDS,
+        FUSION_ENGINE_NAMES,
+        FUSION_RUNTIME_DIAGNOSTIC_NAMES,
         MODE_NAMES,
         RMS_VECTOR_NAME_BY_ID_OFFSET,
         CanFrame,
@@ -238,7 +242,8 @@ PERIODIC_COMMANDS = {
     0x0D: "Gyroscope",
     0x0F: "Set values to zero",
     0x10: "RMS acceleration",
-    0xE4: "Measured sample rate",
+    0x18: "Fusion diagnostics (FW 0x0136+)",
+    0xE4: "Measured internal sample rate",
 }
 
 PERIODIC_SUBCOMMANDS: dict[int, tuple[tuple[int, str], ...]] = {
@@ -249,7 +254,7 @@ PERIODIC_SUBCOMMANDS: dict[int, tuple[tuple[int, str], ...]] = {
     ),
     0x0A: (
         (0x00, "Acceleration XYZ"),
-        (0x01, "Linear acceleration XYZ (fusion mode)"),
+        (0x01, "Linear acceleration XYZ (fusion-derived)"),
         (0x03, "Acceleration X: current/min/max"),
         (0x04, "Acceleration Y: current/min/max"),
         (0x05, "Acceleration Z: current/min/max"),
@@ -284,7 +289,12 @@ PERIODIC_SUBCOMMANDS: dict[int, tuple[tuple[int, str], ...]] = {
         (0x04, "Reset acceleration XYZ min/max"),
     ),
     0x10: ((0x00, "RMS output selected by vibration mode"),),
-    0xE4: ((0x00, "Measured acquisition rate"),),
+    0x18: (
+        (0x12, "Fusion state: engine / output / startup / rejection flags"),
+        (0x13, "Fusion rejection: acceleration error / recovery / startup resets"),
+        (0x14, "Fusion counters: fallback / ignored acceleration / startup samples"),
+    ),
+    0xE4: ((0x00, "Measured internal acquisition rate"),),
 }
 
 
@@ -1202,6 +1212,10 @@ class SensorDashboard(QMainWindow):
         self._gyro_calibration_response: Optional[tuple[int, bool]] = None
         self._gyro_calibration_request: Optional[tuple[int, bool]] = None
         self._gyro_runtime_diagnostics: dict[int, dict[str, object]] = {}
+        self._fusion_debug_summary: Optional[bytes] = None
+        self._fusion_debug_last_seen: Optional[float] = None
+        self._fusion_debug_response: Optional[tuple[int, bool]] = None
+        self._fusion_debug_details: dict[int, str] = {}
         self._tx_sequence_queue: deque[tuple[bytes, int]] = deque()
         self._combined_latest = {
             "acceleration": [math.nan, math.nan, math.nan],
@@ -1381,6 +1395,15 @@ class SensorDashboard(QMainWindow):
         live_header.addWidget(self.clear_charts_button)
         live_layout.addLayout(live_header)
         live_layout.addWidget(self.live_input_label)
+        self.fusion_debug_label = QLabel("Fusion: waiting for diagnostics")
+        self.fusion_debug_label.setWordWrap(True)
+        self.fusion_debug_label.setStyleSheet("color: #315d87; font-weight: bold;")
+        self.fusion_debug_label.setToolTip(
+            "Enable periodic 0x18/0x12 for live fusion state (firmware 0x0136+), "
+            "or enable live polling with firmware 0x0135+. "
+            "Optional 0x18/0x13 and 0x18/0x14 details appear here on hover."
+        )
+        live_layout.addWidget(self.fusion_debug_label)
 
         self.accel_values_label = QLabel("X —     Y —     Z —")
         self.accel_values_label.setStyleSheet("font: 600 15px 'Segoe UI';")
@@ -1953,7 +1976,12 @@ class SensorDashboard(QMainWindow):
         layout.addWidget(self.periodic_table)
         note = QLabel(
             "Slots are changed in RAM first. Disabling a slot stops transmission but retains its command and "
-            "interval for reuse. Save to sensor flash only after verifying the configuration."
+            "interval for reuse. Save to sensor flash only after verifying the configuration. "
+            "Select 0x0A/0x01 at 40 ms for fusion linear acceleration, and 0xE4/0x00 at "
+            "1000 ms for the measured internal sample rate. Firmware 0x0136+ also supports "
+            "0x18/0x12 (fusion state), 0x18/0x13 (rejection), and 0x18/0x14 (counters). "
+            "Start with 100 ms for state/rejection and 500 ms for counters. "
+            "Fusion state appears above the live plots; decoded replies appear in the CAN log."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #666;")
@@ -2132,6 +2160,7 @@ class SensorDashboard(QMainWindow):
                 )
             self._current_mode = None
             self._current_sensor_response = None
+            self._clear_fusion_debug("Fusion: disconnected")
             self._clear_imu_settings_readback()
             self._decoder.sensor_can_id = None
             self._decoder.system_mode = None
@@ -2234,6 +2263,7 @@ class SensorDashboard(QMainWindow):
             return
         self._current_mode = None
         self._current_sensor_response = None
+        self._clear_fusion_debug("Fusion: waiting for target diagnostics")
         self._clear_imu_settings_readback()
         self._firmware_version = None
         self._gyro_policy_supported = None
@@ -2440,6 +2470,8 @@ class SensorDashboard(QMainWindow):
             self._send(request_payload(CMD_GET_SAMPLING_TIME))
             if self._current_mode == 1:
                 self._send(request_payload(CMD_GET_YAW_REFERENCE))
+                if self._firmware_version is not None and self._firmware_version >= 0x135:
+                    self._send(request_payload(CMD_GET_CALIBRATION_INFORMATION, 0x12))
 
     def _handle_transmitted(self, can_id: int, data: bytes, extended: bool) -> None:
         self._append_log(
@@ -2643,7 +2675,11 @@ class SensorDashboard(QMainWindow):
         elif command == CMD_GET_SYSTEM_MODE and len(data) >= 2:
             mode = data[2] if len(data) >= 4 and data[1] == 0 else data[1]
             response_identity = (frame.can_id, frame.is_extended)
+            if self._current_mode is not None and self._current_mode != mode:
+                self._clear_fusion_debug()
             if self._current_sensor_response != response_identity:
+                if self._fusion_debug_response != response_identity:
+                    self._clear_fusion_debug()
                 self._clear_imu_settings_readback()
                 self._firmware_version = None
                 self._gyro_policy_supported = None
@@ -2654,6 +2690,7 @@ class SensorDashboard(QMainWindow):
             self._current_sensor_response = response_identity
             self._set_combo_data(self.mode_combo, mode)
             self._imu_mode_controls_changed()
+            self._refresh_fusion_debug_label()
         elif command == CMD_SET_FSR and len(data) >= 3:
             if data[1] == 1:
                 self._current_accel_fsr = data[2]
@@ -2697,6 +2734,22 @@ class SensorDashboard(QMainWindow):
                 f"raw {raw_yaw / 100.0:+.2f}° · output {output_yaw / 100.0:+.2f}° · "
                 f"offset {offset / 100.0:+.2f}°"
             )
+        elif (
+            command == CMD_GET_CALIBRATION_INFORMATION
+            and len(data) == 8
+            and data[1] in FUSION_RUNTIME_DIAGNOSTIC_NAMES
+        ):
+            response = (frame.can_id, frame.is_extended)
+            if self._current_sensor_response is not None and self._current_sensor_response != response:
+                return
+            if self._fusion_debug_response != response:
+                self._clear_fusion_debug()
+            self._fusion_debug_response = response
+            self._fusion_debug_details[data[1]] = decoded or data.hex(" ")
+            if data[1] == 0x12:
+                self._fusion_debug_summary = data
+                self._fusion_debug_last_seen = time.monotonic()
+            self._refresh_fusion_debug_label()
         elif (
             command == CMD_GET_CALIBRATION_INFORMATION
             and len(data) == 8
@@ -3022,6 +3075,66 @@ class SensorDashboard(QMainWindow):
         if self.tabs.currentIndex() == self._log_tab_index and at_bottom:
             bar.setValue(bar.maximum())
 
+    def _clear_fusion_debug(self, message: str = "Fusion: waiting for diagnostics") -> None:
+        self._fusion_debug_summary = None
+        self._fusion_debug_last_seen = None
+        self._fusion_debug_response = None
+        self._fusion_debug_details.clear()
+        self._pending_label_text.pop(self.fusion_debug_label, None)
+        self.fusion_debug_label.setText(message)
+        self.fusion_debug_label.setToolTip(
+            "Enable periodic 0x18/0x12 (firmware 0x0136+), "
+            "or live polling (firmware 0x0135+) for fusion state."
+        )
+
+    def _refresh_fusion_debug_label(self) -> None:
+        data = self._fusion_debug_summary
+        if self._current_mode is not None and self._current_mode != 1:
+            text = f"Fusion: inactive — {MODE_NAMES.get(self._current_mode, 'unknown mode')}"
+        elif self._firmware_version is not None and self._firmware_version < 0x135:
+            text = "Fusion: status unavailable (requires firmware 0x0135+)"
+        elif data is None:
+            text = "Fusion: waiting for diagnostics (enable 0x18/0x12 or live polling)"
+        elif data[2] != 1:
+            text = f"Fusion: unsupported status format v{data[2]}"
+        else:
+            output = FUSION_ENGINE_NAMES.get(data[4], f"unknown engine {data[4]}")
+            if data[6]:
+                state = "Starting"
+            elif not data[5]:
+                state = "Not ready"
+            else:
+                state = "Running"
+            if data[3] == 1 and data[4] == 0:
+                output += " fallback"
+            if data[7] & 0x02:
+                correction = "acceleration recovery"
+            elif data[7] & 0x01:
+                correction = "acceleration rejected"
+            else:
+                correction = "acceleration accepted"
+            text = f"Fusion: {state} — {output} · {correction}"
+            if data[7] & ~0x03:
+                text += f" · unknown flags 0x{data[7]:02X}"
+            timeout = max(
+                [3.0] + [
+                    3.0 * configuration.interval_ms / 1000.0
+                    for configuration in self._periodic_configurations.values()
+                    if configuration.enabled and configuration.command == 0x18
+                    and configuration.subcommand == 0x12
+                ]
+            )
+            if (
+                self._fusion_debug_last_seen is not None
+                and time.monotonic() - self._fusion_debug_last_seen > timeout
+            ):
+                text = "Fusion: stale — no recent status; last: " + text.removeprefix("Fusion: ")
+        self._queue_label_text(self.fusion_debug_label, text)
+        if self._fusion_debug_details:
+            self.fusion_debug_label.setToolTip("\n".join(
+                self._fusion_debug_details[key] for key in sorted(self._fusion_debug_details)
+            ))
+
     def _queue_label_text(self, label: QLabel, text: str) -> None:
         self._pending_label_text[label] = text
 
@@ -3053,6 +3166,7 @@ class SensorDashboard(QMainWindow):
             chart.render_pending()
 
     def _update_message_rate(self) -> None:
+        self._refresh_fusion_debug_label()
         rate = self._frames_received - self._last_rate_count
         self._last_rate_count = self._frames_received
         charts = (

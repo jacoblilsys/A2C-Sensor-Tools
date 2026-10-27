@@ -201,6 +201,147 @@ class SensorDashboardPlotTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
 
+    def test_fusion_periodic_dropdown_readback_and_apply_payloads(self) -> None:
+        with patch.object(SensorDashboard, "refresh_channels"):
+            dashboard = SensorDashboard()
+        configurations = (
+            PeriodicConfiguration(1, True, 0x0A, 0x00, 40),
+            PeriodicConfiguration(2, True, 0x0D, 0x00, 40),
+            PeriodicConfiguration(3, True, 0x0B, 0x02, 40),
+            PeriodicConfiguration(4, True, 0x0A, 0x01, 40),
+            PeriodicConfiguration(5, True, 0xE4, 0x00, 1000),
+            PeriodicConfiguration(6, True, 0x18, 0x12, 100),
+            PeriodicConfiguration(7, True, 0x18, 0x13, 100),
+            PeriodicConfiguration(8, True, 0x18, 0x14, 500),
+        )
+        try:
+            self.assertEqual(
+                set(dashboard_module.PERIODIC_COMMANDS),
+                {0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0F, 0x10, 0x18, 0xE4},
+            )
+            self.assertEqual(
+                [value for value, _name in periodic_subcommands(0x18)],
+                [0x12, 0x13, 0x14],
+            )
+            for configuration in configurations:
+                dashboard._update_periodic_row(configuration)
+                row = dashboard._periodic_rows[configuration.task - 1]
+                self.assertEqual(row.command.currentData(), configuration.command)
+                self.assertEqual(row.subcommand.currentData(), configuration.subcommand)
+                self.assertNotIn("unsupported", row.status.text())
+                self.assertEqual(dashboard._periodic_configuration(configuration.task), configuration)
+            with patch.object(dashboard, "_schedule_payloads") as schedule, patch.object(
+                dashboard_module.QTimer, "singleShot"
+            ):
+                dashboard.apply_periodic_settings()
+            payloads = schedule.call_args.args[0]
+            self.assertEqual(payloads, [
+                bytes.fromhex("52 01 01 0A 00 00 28 00"),
+                bytes.fromhex("52 02 01 0D 00 00 28 00"),
+                bytes.fromhex("52 03 01 0B 02 00 28 00"),
+                bytes.fromhex("52 04 01 0A 01 00 28 00"),
+                bytes.fromhex("52 05 01 E4 00 03 E8 00"),
+                bytes.fromhex("52 06 01 18 12 00 64 00"),
+                bytes.fromhex("52 07 01 18 13 00 64 00"),
+                bytes.fromhex("52 08 01 18 14 01 F4 00"),
+            ])
+            dashboard._handle_frame(CanFrame(0x125, bytes.fromhex("18 13 13 88 01 F4 00 02")))
+            self.assertTrue(any("acceleration error=5.000 deg" in line for line in dashboard._pending_log_lines))
+        finally:
+            for timer in (dashboard._poll_timer, dashboard._rate_timer, dashboard._render_timer,
+                          dashboard._label_timer, dashboard._log_timer):
+                timer.stop()
+            dashboard.deleteLater()
+
+    def test_fusion_debug_label_states_details_and_freshness(self) -> None:
+        with patch.object(SensorDashboard, "refresh_channels"):
+            dashboard = SensorDashboard()
+        dashboard._current_sensor_response = (0x125, False)
+        cases = (
+            ("18 12 01 01 00 00 01 00", "Starting", "InvenSense fallback", "acceleration accepted"),
+            ("18 12 01 01 00 00 00 00", "Not ready", "InvenSense fallback", "acceleration accepted"),
+            ("18 12 01 01 01 01 00 00", "Running", "x-io Fusion", "acceleration accepted"),
+            ("18 12 01 01 01 01 00 01", "Running", "x-io Fusion", "acceleration rejected"),
+            ("18 12 01 01 01 01 00 03", "Running", "x-io Fusion", "acceleration recovery"),
+            ("18 12 01 00 00 01 00 00", "Running", "InvenSense", "acceleration accepted"),
+        )
+        try:
+            with patch.object(dashboard_module.time, "monotonic", return_value=100.0):
+                for payload, *expected in cases:
+                    dashboard._handle_frame(CanFrame(0x125, bytes.fromhex(payload)))
+                    dashboard._flush_live_labels()
+                    for text in expected:
+                        self.assertIn(text, dashboard.fusion_debug_label.text())
+                dashboard._handle_frame(CanFrame(0x125, bytes.fromhex("18 13 13 88 01 F4 00 02")))
+                dashboard._handle_frame(CanFrame(0x125, bytes.fromhex("18 14 00 05 00 03 0B B8")))
+            self.assertIn("acceleration error=5.000 deg", dashboard.fusion_debug_label.toolTip())
+            self.assertIn("fallback samples=5", dashboard.fusion_debug_label.toolTip())
+            with patch.object(dashboard_module.time, "monotonic", return_value=104.0):
+                # Metrics alone must not make an old state look current.
+                dashboard._handle_frame(CanFrame(0x125, bytes.fromhex("18 13 13 88 01 F4 00 02")))
+                dashboard._flush_live_labels()
+            self.assertIn("stale", dashboard.fusion_debug_label.text())
+            dashboard._periodic_configurations[6] = PeriodicConfiguration(6, True, 0x18, 0x12, 10000)
+            with patch.object(dashboard_module.time, "monotonic", return_value=110.0):
+                dashboard._refresh_fusion_debug_label()
+                dashboard._flush_live_labels()
+            self.assertNotIn("stale", dashboard.fusion_debug_label.text())
+            last_summary = dashboard._fusion_debug_summary
+            dashboard._handle_frame(CanFrame(0x126, bytes.fromhex("18 12 01 01 01 01 00 01")))
+            dashboard._handle_frame(CanFrame(0x125, bytes.fromhex("18 12 01 01 01 01 00 01"), flags=4))
+            self.assertEqual(dashboard._fusion_debug_summary, last_summary)
+            dashboard._handle_frame(CanFrame(0x125, bytes.fromhex("18 12 01")))
+            self.assertEqual(dashboard._fusion_debug_summary, last_summary)
+            dashboard._request_target_changed()
+            dashboard._flush_live_labels()
+            self.assertIsNone(dashboard._fusion_debug_summary)
+            self.assertNotIn("Running", dashboard.fusion_debug_label.text())
+            self.assertNotIn("fallback samples", dashboard.fusion_debug_label.toolTip())
+            dashboard._handle_frame(CanFrame(0x125, bytes.fromhex("18 12 01 01 01 01 00 00")))
+            dashboard._connection_changed(False, "")
+            dashboard._flush_live_labels()
+            self.assertEqual(dashboard.fusion_debug_label.text(), "Fusion: disconnected")
+        finally:
+            for timer in (dashboard._poll_timer, dashboard._rate_timer, dashboard._render_timer,
+                          dashboard._label_timer, dashboard._log_timer):
+                timer.stop()
+            dashboard.deleteLater()
+
+    def test_fusion_debug_polling_is_opt_in_and_checks_firmware(self) -> None:
+        with patch.object(SensorDashboard, "refresh_channels"):
+            dashboard = SensorDashboard()
+        dashboard._connected = True
+        dashboard._current_mode = 1
+        dashboard._firmware_version = 0x135
+        try:
+            with patch.object(dashboard, "_send") as send:
+                dashboard.live_poll_checkbox.setChecked(False)
+                for _ in range(10):
+                    dashboard._poll_live_data()
+                send.assert_not_called()
+                dashboard.live_poll_checkbox.setChecked(True)
+                for _ in range(10):
+                    dashboard._poll_live_data()
+                send.assert_any_call(bytes.fromhex("18 12 00 00 00 00 00 00"))
+                send.reset_mock()
+                dashboard._firmware_version = 0x134
+                for _ in range(10):
+                    dashboard._poll_live_data()
+                self.assertFalse(any(call.args[0][0] == 0x18 for call in send.call_args_list))
+            dashboard._current_mode = 2
+            dashboard._refresh_fusion_debug_label()
+            dashboard._flush_live_labels()
+            self.assertIn("inactive", dashboard.fusion_debug_label.text())
+            dashboard._current_mode = 1
+            dashboard._refresh_fusion_debug_label()
+            dashboard._flush_live_labels()
+            self.assertIn("status unavailable", dashboard.fusion_debug_label.text())
+        finally:
+            for timer in (dashboard._poll_timer, dashboard._rate_timer, dashboard._render_timer,
+                          dashboard._label_timer, dashboard._log_timer):
+                timer.stop()
+            dashboard.deleteLater()
+
     def test_peak_selection_disables_kvaser_sample_point(self) -> None:
         with patch.object(SensorDashboard, "refresh_channels"):
             dashboard = SensorDashboard()

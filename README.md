@@ -107,6 +107,55 @@ framing, timestamps, error handling, and channel release. PEAK firmware updates
 have also been validated on customer hardware; dashboard coverage is tested
 offline and uses the same PCAN transport.
 
+## Periodic fusion debugging (0.2.0-beta.8)
+
+In the dashboard's **Periodic messages** tab, choose a command and subcommand
+from the dropdowns, enable the slot, set its interval, and select **Apply all
+slots (volatile)**. For sensor-fusion debugging, use normal/fusion mode with
+the following configuration, including the three fusion diagnostics supported
+as periodic messages by firmware 0x0136 or newer:
+
+| Task | Command | Subcommand | Interval | Output |
+| --- | --- | --- | --- | --- |
+| 1 | `0x0A` | `0x00` | 40 ms | Acceleration XYZ |
+| 2 | `0x0D` | `0x00` | 40 ms | Gyroscope XYZ |
+| 3 | `0x0B` | `0x02` | 40 ms | Fusion Euler XYZ, 0.01 degree/count |
+| 4 | `0x0A` | `0x01` | 40 ms | Fusion-derived linear acceleration XYZ |
+| 5 | `0xE4` | `0x00` | 1000 ms | Measured internal sample rate |
+| 6 | `0x18` | `0x12` | 100 ms | Fusion engine, active output, ready/startup and rejection flags |
+| 7 | `0x18` | `0x13` | 100 ms | Acceleration error, recovery trigger and startup resets |
+| 8 | `0x18` | `0x14` | 500 ms | Fallback, ignored-acceleration and startup sample counters |
+
+Linear acceleration and measured sample rate were already selectable in earlier
+app versions; their dropdown labels are clearer in beta.7. Linear acceleration
+now also has decoded XYZ values and a separate stream-statistics entry in the
+CAN monitor.
+
+The **Fusion** label above the live plots shows a simple state string, for
+example `Fusion: Running — x-io Fusion · acceleration rejected`. It distinguishes
+startup, not ready, running, InvenSense fallback, acceleration rejection and
+recovery. Hover over it for the decoded summary, rejection metrics and counters
+received so far. Missing status is marked stale after three seconds, or three
+configured summary intervals if longer. Disconnecting, changing target or
+changing sensor mode clears the previous state. Vibration and standby modes
+show fusion as inactive.
+
+Enabling **Poll sensor at 10 Hz** also requests the fusion summary once per
+second in fusion mode when the reported firmware is 0x0135 or newer. With
+polling off, the label listens to incoming periodic replies without sending
+additional requests. Firmware 0x0135 supports direct diagnostic queries;
+periodic fusion diagnostics require 0x0136 or newer.
+
+The periodic dropdown covers the firmware's supported commands: `0x09`, `0x0A`,
+`0x0B`, `0x0C`, `0x0D`, `0x0F`, `0x10`, `0x18` (only `0x12`–`0x14`) and
+`0xE4`. Other `0x18` calibration subcommands and `0xC6` yaw reference remain
+query-only. `0x0F` resets min/max values rather than producing measurement data.
+Diagnostic error is shown in degrees, recovery trigger as a percentage, and
+wire counters saturate at 65535.
+
+Changes remain in RAM until explicitly saved to sensor flash. Building or
+starting the app does not enable slots on a connected sensor automatically.
+
 ## Build the Windows customer package
 
 Install the optional build dependency and run the packaging script:
